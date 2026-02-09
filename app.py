@@ -40,7 +40,9 @@ try:
 except Exception:
     load_dotenv = None
 
-load_dotenv()
+if load_dotenv:
+    load_dotenv()
+
 # ==========================================================
 # APP + DATABASE CONFIG
 # ==========================================================
@@ -80,316 +82,328 @@ if CORS:
     CORS(app, resources={r"/*": {"origins": "*"}}, supports_credentials=True)
 
 
-# def ensure_questionnaire_tables():
-#     try:
-#         def _col_exists(table_name: str, column_name: str) -> bool:
-#             row = db.session.execute(sql_text("""
-#                 SELECT COUNT(*) AS cnt
-#                 FROM information_schema.columns
-#                 WHERE table_schema = DATABASE()
-#                   AND table_name = :t
-#                   AND column_name = :c
-#             """), {"t": table_name, "c": column_name}).mappings().fetchone()
-#             return row and int(row["cnt"]) > 0
+def ensure_questionnaire_tables():
+    try:
+        def _col_exists(table_name: str, column_name: str) -> bool:
+            row = db.session.execute(sql_text("""
+                SELECT COUNT(*) AS cnt
+                FROM information_schema.columns
+                WHERE table_schema = DATABASE()
+                  AND table_name = :t
+                  AND column_name = :c
+            """), {"t": table_name, "c": column_name}).mappings().fetchone()
+            return row and int(row["cnt"]) > 0
 
-#         ddl = [
-#             """
-#             CREATE TABLE IF NOT EXISTS questionnaire_sections (
-#                 section_id INT AUTO_INCREMENT NOT NULL,
-#                 section_order INT NOT NULL,
-#                 section_title VARCHAR(255) NOT NULL,
-#                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-#                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-#                 PRIMARY KEY (section_id),
-#                 UNIQUE KEY uk_section_order (section_order),
-#                 UNIQUE KEY uk_section_title (section_title),
-#                 INDEX idx_section_order (section_order)
-#             ) ENGINE=InnoDB;
-#             """,
-#             """
-#             CREATE TABLE IF NOT EXISTS questions (
-#                 question_id INT AUTO_INCREMENT NOT NULL,
-#                 question_order INT NOT NULL,
-#                 question_section_id INT DEFAULT NULL,
-#                 question_text TEXT NOT NULL,
-#                 question_type VARCHAR(50) NOT NULL,
-#                 answer_type VARCHAR(20) NOT NULL,
-#                 options TEXT NULL,
-#                 parent_id INT NULL,
-#                 trigger_value VARCHAR(255) NULL,
-#                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-#                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-#                 PRIMARY KEY (question_id),
-#                 UNIQUE KEY uk_question_order (question_order),
-#                 INDEX idx_question_order (question_order),
-#                 INDEX idx_question_section_id (question_section_id),
-#                 INDEX idx_questions_parent (parent_id),
-#                 CONSTRAINT fk_question_section
-#                     FOREIGN KEY (question_section_id)
-#                     REFERENCES questionnaire_sections(section_id)
-#                     ON DELETE CASCADE ON UPDATE CASCADE,
-#                 CONSTRAINT fk_parent_question
-#                     FOREIGN KEY (parent_id)
-#                     REFERENCES questions(question_id)
-#                     ON DELETE CASCADE,
-#                 CHECK (question_type IN ('multiple_choice', 'single_choice', 'open_ended')),
-#                 CHECK (answer_type IN ('text', 'numerical'))
-#             ) ENGINE=InnoDB;
-#             """,
-#             """
-#             CREATE TABLE IF NOT EXISTS individual_questionnaire_sections (
-#                 section_id INT AUTO_INCREMENT NOT NULL,
-#                 section_order INT NOT NULL,
-#                 section_title VARCHAR(255) NOT NULL,
-#                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-#                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-#                 PRIMARY KEY (section_id),
-#                 UNIQUE KEY uk_individual_section_order (section_order),
-#                 UNIQUE KEY uk_individual_section_title (section_title),
-#                 INDEX idx_individual_section_order (section_order)
-#             ) ENGINE=InnoDB;
-#             """,
-#             """
-#             CREATE TABLE IF NOT EXISTS individual_questions (
-#                 question_id INT AUTO_INCREMENT NOT NULL,
-#                 question_order INT NOT NULL,
-#                 question_section_id INT DEFAULT NULL,
-#                 question_text TEXT NOT NULL,
-#                 question_type VARCHAR(50) NOT NULL,
-#                 answer_type VARCHAR(20) NOT NULL,
-#                 options TEXT NULL,
-#                 parent_id INT NULL,
-#                 trigger_value VARCHAR(255) NULL,
-#                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-#                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-#                 PRIMARY KEY (question_id),
-#                 UNIQUE KEY uk_individual_question_order (question_order),
-#                 INDEX idx_individual_question_order (question_order),
-#                 INDEX idx_individual_question_section_id (question_section_id),
-#                 INDEX idx_individual_questions_parent (parent_id),
-#                 CONSTRAINT fk_individual_question_section
-#                     FOREIGN KEY (question_section_id)
-#                     REFERENCES individual_questionnaire_sections(section_id)
-#                     ON DELETE CASCADE ON UPDATE CASCADE,
-#                 CONSTRAINT fk_individual_parent_question
-#                     FOREIGN KEY (parent_id)
-#                     REFERENCES individual_questions(question_id)
-#                     ON DELETE CASCADE,
-#                 CHECK (question_type IN ('multiple_choice', 'single_choice', 'open_ended')),
-#                 CHECK (answer_type IN ('text', 'numerical'))
-#             ) ENGINE=InnoDB;
-#             """,
-#             """
-#             CREATE TABLE IF NOT EXISTS main_questionnaire_responses (
-#                 main_questionnaire_id BIGINT NOT NULL AUTO_INCREMENT,
-#                 household_id INT NOT NULL,
-#                 user_id INT NOT NULL,
-#                 responses JSON NOT NULL,
-#                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-#                 PRIMARY KEY (main_questionnaire_id),
-#                 INDEX idx_main_questionnaire_household (household_id),
-#                 INDEX idx_main_questionnaire_user (user_id),
-#                 CONSTRAINT fk_main_questionnaire_household
-#                     FOREIGN KEY (household_id) REFERENCES households(household_id)
-#                     ON DELETE CASCADE,
-#                 CONSTRAINT fk_main_questionnaire_user
-#                     FOREIGN KEY (user_id) REFERENCES users(user_id)
-#                     ON DELETE CASCADE
-#             ) ENGINE=InnoDB;
-#             """,
-#             """
-#             CREATE TABLE IF NOT EXISTS survey_contributors (
-#                 contributor_id BIGINT NOT NULL AUTO_INCREMENT,
-#                 main_questionnaire_id BIGINT NOT NULL,
-#                 user_id INT NOT NULL,
-#                 contributed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-#                 PRIMARY KEY (contributor_id),
-#                 UNIQUE KEY uk_contributor_main_user (main_questionnaire_id, user_id),
-#                 INDEX idx_contrib_main (main_questionnaire_id),
-#                 INDEX idx_contrib_user (user_id),
-#                 CONSTRAINT fk_contrib_main
-#                     FOREIGN KEY (main_questionnaire_id)
-#                     REFERENCES main_questionnaire_responses(main_questionnaire_id)
-#                     ON DELETE CASCADE,
-#                 CONSTRAINT fk_contrib_user
-#                     FOREIGN KEY (user_id) REFERENCES users(user_id)
-#                     ON DELETE CASCADE
-#             ) ENGINE=InnoDB;
-#             """,
-#             """
-#             CREATE TABLE IF NOT EXISTS individual_questionnaire_responses (
-#                 individual_questionnaire_id BIGINT NOT NULL AUTO_INCREMENT,
-#                 responses JSON NOT NULL,
-#                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-#                 PRIMARY KEY (individual_questionnaire_id)
-#             ) ENGINE=InnoDB;
-#             """,
-#             """
-#             CREATE TABLE IF NOT EXISTS main_individual_questionnaire_links (
-#                 link_id BIGINT NOT NULL AUTO_INCREMENT,
-#                 main_questionnaire_id BIGINT NOT NULL,
-#                 individual_questionnaire_id BIGINT NOT NULL,
-#                 household_id INT NOT NULL,
-#                 filled_by_user_id INT NOT NULL,
-#                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-#                 PRIMARY KEY (link_id),
-#                 INDEX idx_link_main (main_questionnaire_id),
-#                 INDEX idx_link_individual (individual_questionnaire_id),
-#                 INDEX idx_link_household (household_id),
-#                 CONSTRAINT fk_link_main
-#                     FOREIGN KEY (main_questionnaire_id)
-#                     REFERENCES main_questionnaire_responses(main_questionnaire_id)
-#                     ON DELETE CASCADE,
-#                 CONSTRAINT fk_link_individual
-#                     FOREIGN KEY (individual_questionnaire_id)
-#                     REFERENCES individual_questionnaire_responses(individual_questionnaire_id)
-#                     ON DELETE CASCADE,
-#                 CONSTRAINT fk_link_household
-#                     FOREIGN KEY (household_id) REFERENCES households(household_id)
-#                     ON DELETE CASCADE,
-#                 CONSTRAINT fk_link_user
-#                     FOREIGN KEY (filled_by_user_id) REFERENCES users(user_id)
-#                     ON DELETE CASCADE
-#             ) ENGINE=InnoDB;
-#             """
-#             ,
-#             """
-#             CREATE TABLE IF NOT EXISTS household_response_drafts (
-#                 draft_id BIGINT NOT NULL AUTO_INCREMENT,
-#                 household_id INT NOT NULL,
-#                 user_id INT NOT NULL,
-#                 response_data JSON NULL,
-#                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-#                 PRIMARY KEY (draft_id),
-#                 UNIQUE KEY uk_draft_household_user (household_id, user_id),
-#                 INDEX idx_draft_household (household_id),
-#                 INDEX idx_draft_user (user_id),
-#                 CONSTRAINT fk_draft_household
-#                     FOREIGN KEY (household_id) REFERENCES households(household_id)
-#                     ON DELETE CASCADE,
-#                 CONSTRAINT fk_draft_user
-#                     FOREIGN KEY (user_id) REFERENCES users(user_id)
-#                     ON DELETE CASCADE
-#             ) ENGINE=InnoDB;
-#             """
-#         ]
+        ddl = [
+            """
+            CREATE TABLE IF NOT EXISTS questionnaire_sections (
+                section_id INT AUTO_INCREMENT NOT NULL,
+                section_order INT NOT NULL,
+                section_title VARCHAR(255) NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                PRIMARY KEY (section_id),
+                UNIQUE KEY uk_section_order (section_order),
+                UNIQUE KEY uk_section_title (section_title),
+                INDEX idx_section_order (section_order)
+            ) ENGINE=InnoDB;
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS questions (
+                question_id INT AUTO_INCREMENT NOT NULL,
+                question_order INT NOT NULL,
+                question_section_id INT DEFAULT NULL,
+                question_text TEXT NOT NULL,
+                question_type VARCHAR(50) NOT NULL,
+                answer_type VARCHAR(20) NOT NULL,
+                options TEXT NULL,
+                parent_id INT NULL,
+                trigger_value VARCHAR(255) NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                PRIMARY KEY (question_id),
+                UNIQUE KEY uk_question_order (question_order),
+                INDEX idx_question_order (question_order),
+                INDEX idx_question_section_id (question_section_id),
+                INDEX idx_questions_parent (parent_id),
+                CONSTRAINT fk_question_section
+                    FOREIGN KEY (question_section_id)
+                    REFERENCES questionnaire_sections(section_id)
+                    ON DELETE CASCADE ON UPDATE CASCADE,
+                CONSTRAINT fk_parent_question
+                    FOREIGN KEY (parent_id)
+                    REFERENCES questions(question_id)
+                    ON DELETE CASCADE,
+                CHECK (question_type IN ('multiple_choice', 'single_choice', 'open_ended')),
+                CHECK (answer_type IN ('text', 'numerical'))
+            ) ENGINE=InnoDB;
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS individual_questionnaire_sections (
+                section_id INT AUTO_INCREMENT NOT NULL,
+                section_order INT NOT NULL,
+                section_title VARCHAR(255) NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                PRIMARY KEY (section_id),
+                UNIQUE KEY uk_individual_section_order (section_order),
+                UNIQUE KEY uk_individual_section_title (section_title),
+                INDEX idx_individual_section_order (section_order)
+            ) ENGINE=InnoDB;
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS individual_questions (
+                question_id INT AUTO_INCREMENT NOT NULL,
+                question_order INT NOT NULL,
+                question_section_id INT DEFAULT NULL,
+                question_text TEXT NOT NULL,
+                question_type VARCHAR(50) NOT NULL,
+                answer_type VARCHAR(20) NOT NULL,
+                options TEXT NULL,
+                parent_id INT NULL,
+                trigger_value VARCHAR(255) NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                PRIMARY KEY (question_id),
+                UNIQUE KEY uk_individual_question_order (question_order),
+                INDEX idx_individual_question_order (question_order),
+                INDEX idx_individual_question_section_id (question_section_id),
+                INDEX idx_individual_questions_parent (parent_id),
+                CONSTRAINT fk_individual_question_section
+                    FOREIGN KEY (question_section_id)
+                    REFERENCES individual_questionnaire_sections(section_id)
+                    ON DELETE CASCADE ON UPDATE CASCADE,
+                CONSTRAINT fk_individual_parent_question
+                    FOREIGN KEY (parent_id)
+                    REFERENCES individual_questions(question_id)
+                    ON DELETE CASCADE,
+                CHECK (question_type IN ('multiple_choice', 'single_choice', 'open_ended')),
+                CHECK (answer_type IN ('text', 'numerical'))
+            ) ENGINE=InnoDB;
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS main_questionnaire_responses (
+                main_questionnaire_id BIGINT NOT NULL AUTO_INCREMENT,
+                household_id INT NOT NULL,
+                user_id INT NOT NULL,
+                responses JSON NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (main_questionnaire_id),
+                INDEX idx_main_questionnaire_household (household_id),
+                INDEX idx_main_questionnaire_user (user_id),
+                CONSTRAINT fk_main_questionnaire_household
+                    FOREIGN KEY (household_id) REFERENCES households(household_id)
+                    ON DELETE CASCADE,
+                CONSTRAINT fk_main_questionnaire_user
+                    FOREIGN KEY (user_id) REFERENCES users(user_id)
+                    ON DELETE CASCADE
+            ) ENGINE=InnoDB;
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS survey_contributors (
+                contributor_id BIGINT NOT NULL AUTO_INCREMENT,
+                main_questionnaire_id BIGINT NOT NULL,
+                user_id INT NOT NULL,
+                contributed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (contributor_id),
+                UNIQUE KEY uk_contributor_main_user (main_questionnaire_id, user_id),
+                INDEX idx_contrib_main (main_questionnaire_id),
+                INDEX idx_contrib_user (user_id),
+                CONSTRAINT fk_contrib_main
+                    FOREIGN KEY (main_questionnaire_id)
+                    REFERENCES main_questionnaire_responses(main_questionnaire_id)
+                    ON DELETE CASCADE,
+                CONSTRAINT fk_contrib_user
+                    FOREIGN KEY (user_id) REFERENCES users(user_id)
+                    ON DELETE CASCADE
+            ) ENGINE=InnoDB;
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS individual_questionnaire_responses (
+                individual_questionnaire_id BIGINT NOT NULL AUTO_INCREMENT,
+                responses JSON NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (individual_questionnaire_id)
+            ) ENGINE=InnoDB;
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS main_individual_questionnaire_links (
+                link_id BIGINT NOT NULL AUTO_INCREMENT,
+                main_questionnaire_id BIGINT NOT NULL,
+                individual_questionnaire_id BIGINT NOT NULL,
+                household_id INT NOT NULL,
+                filled_by_user_id INT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (link_id),
+                INDEX idx_link_main (main_questionnaire_id),
+                INDEX idx_link_individual (individual_questionnaire_id),
+                INDEX idx_link_household (household_id),
+                CONSTRAINT fk_link_main
+                    FOREIGN KEY (main_questionnaire_id)
+                    REFERENCES main_questionnaire_responses(main_questionnaire_id)
+                    ON DELETE CASCADE,
+                CONSTRAINT fk_link_individual
+                    FOREIGN KEY (individual_questionnaire_id)
+                    REFERENCES individual_questionnaire_responses(individual_questionnaire_id)
+                    ON DELETE CASCADE,
+                CONSTRAINT fk_link_household
+                    FOREIGN KEY (household_id) REFERENCES households(household_id)
+                    ON DELETE CASCADE,
+                CONSTRAINT fk_link_user
+                    FOREIGN KEY (filled_by_user_id) REFERENCES users(user_id)
+                    ON DELETE CASCADE
+            ) ENGINE=InnoDB;
+            """
+            ,
+            """
+            CREATE TABLE IF NOT EXISTS household_response_drafts (
+                draft_id BIGINT NOT NULL AUTO_INCREMENT,
+                household_id INT NOT NULL,
+                user_id INT NOT NULL,
+                response_data JSON NULL,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                PRIMARY KEY (draft_id),
+                UNIQUE KEY uk_draft_household_user (household_id, user_id),
+                INDEX idx_draft_household (household_id),
+                INDEX idx_draft_user (user_id),
+                CONSTRAINT fk_draft_household
+                    FOREIGN KEY (household_id) REFERENCES households(household_id)
+                    ON DELETE CASCADE,
+                CONSTRAINT fk_draft_user
+                    FOREIGN KEY (user_id) REFERENCES users(user_id)
+                    ON DELETE CASCADE
+            ) ENGINE=InnoDB;
+            """
+        ]
 
-#         for stmt in ddl:
-#             db.session.execute(sql_text(stmt))
+        for stmt in ddl:
+            db.session.execute(sql_text(stmt))
 
-#         # Backfill missing columns on legacy main questionnaire table
-#         if not _col_exists("questions", "options"):
-#             db.session.execute(sql_text("ALTER TABLE questions ADD COLUMN options TEXT NULL"))
-#         if not _col_exists("questions", "parent_id"):
-#             db.session.execute(sql_text("ALTER TABLE questions ADD COLUMN parent_id INT NULL"))
-#         if not _col_exists("questions", "trigger_value"):
-#             db.session.execute(sql_text("ALTER TABLE questions ADD COLUMN trigger_value VARCHAR(255) NULL"))
+        # Backfill missing columns on legacy main questionnaire table
+        if not _col_exists("questions", "options"):
+            db.session.execute(sql_text("ALTER TABLE questions ADD COLUMN options TEXT NULL"))
+        if not _col_exists("questions", "parent_id"):
+            db.session.execute(sql_text("ALTER TABLE questions ADD COLUMN parent_id INT NULL"))
+        if not _col_exists("questions", "trigger_value"):
+            db.session.execute(sql_text("ALTER TABLE questions ADD COLUMN trigger_value VARCHAR(255) NULL"))
 
-#         db.session.commit()
-#     except Exception:
-#         db.session.rollback()
-#         print("=== ERROR ENSURING QUESTIONNAIRE TABLES ===")
-#         print(traceback.format_exc())
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+        print("=== ERROR ENSURING QUESTIONNAIRE TABLES ===")
+        print(traceback.format_exc())
 
-# def ensure_household_name_unique_index():
-#     try:
-#         def _col_exists(table_name: str, column_name: str) -> bool:
-#             row = db.session.execute(sql_text("""
-#                 SELECT COUNT(*) AS cnt
-#                 FROM information_schema.columns
-#                 WHERE table_schema = DATABASE()
-#                   AND table_name = :t
-#                   AND column_name = :c
-#             """), {"t": table_name, "c": column_name}).mappings().fetchone()
-#             return row and int(row["cnt"]) > 0
+def ensure_household_name_unique_index():
+    try:
+        def _col_exists(table_name: str, column_name: str) -> bool:
+            row = db.session.execute(sql_text("""
+                SELECT COUNT(*) AS cnt
+                FROM information_schema.columns
+                WHERE table_schema = DATABASE()
+                  AND table_name = :t
+                  AND column_name = :c
+            """), {"t": table_name, "c": column_name}).mappings().fetchone()
+            return row and int(row["cnt"]) > 0
 
-#         # Skip if duplicates already exist (would break unique index creation)
-#         dup = db.session.execute(sql_text("""
-#             SELECT LOWER(name) AS n, COUNT(*) AS c
-#             FROM households
-#             GROUP BY LOWER(name)
-#             HAVING c > 1
-#             LIMIT 1
-#         """)).mappings().fetchone()
-#         if dup:
-#             print("=== WARNING: Duplicate household names found; unique index not created ===")
-#             return
+        # Skip if duplicates already exist (would break unique index creation)
+        dup = db.session.execute(sql_text("""
+            SELECT LOWER(name) AS n, COUNT(*) AS c
+            FROM households
+            GROUP BY LOWER(name)
+            HAVING c > 1
+            LIMIT 1
+        """)).mappings().fetchone()
+        if dup:
+            print("=== WARNING: Duplicate household names found; unique index not created ===")
+            return
 
-#         # Add normalized generated column for case-insensitive uniqueness
-#         if not _col_exists("households", "name_ci"):
-#             db.session.execute(sql_text("""
-#                 ALTER TABLE households
-#                 ADD COLUMN name_ci VARCHAR(255)
-#                 GENERATED ALWAYS AS (LOWER(name)) STORED
-#             """))
+        # Add normalized generated column for case-insensitive uniqueness
+        if not _col_exists("households", "name_ci"):
+            db.session.execute(sql_text("""
+                ALTER TABLE households
+                ADD COLUMN name_ci VARCHAR(255)
+                GENERATED ALWAYS AS (LOWER(name)) STORED
+            """))
 
-#         idx = db.session.execute(sql_text("""
-#             SELECT 1 FROM information_schema.statistics
-#             WHERE table_schema = DATABASE()
-#               AND table_name = 'households'
-#               AND index_name = 'uk_households_name_ci'
-#             LIMIT 1
-#         """)).mappings().fetchone()
-#         if not idx:
-#             db.session.execute(sql_text("""
-#                 CREATE UNIQUE INDEX uk_households_name_ci ON households (name_ci)
-#             """))
+        idx = db.session.execute(sql_text("""
+            SELECT 1 FROM information_schema.statistics
+            WHERE table_schema = DATABASE()
+              AND table_name = 'households'
+              AND index_name = 'uk_households_name_ci'
+            LIMIT 1
+        """)).mappings().fetchone()
+        if not idx:
+            db.session.execute(sql_text("""
+                CREATE UNIQUE INDEX uk_households_name_ci ON households (name_ci)
+            """))
 
-#         db.session.commit()
-#     except Exception:
-#         db.session.rollback()
-#         print("=== ERROR ENSURING HOUSEHOLD UNIQUE INDEX ===")
-#         print(traceback.format_exc())
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+        print("=== ERROR ENSURING HOUSEHOLD UNIQUE INDEX ===")
+        print(traceback.format_exc())
 
 
-# def ensure_aadhar_storage_columns():
-#     try:
-#         def _col_exists(table_name: str, column_name: str) -> bool:
-#             row = db.session.execute(sql_text("""
-#                 SELECT COUNT(*) AS cnt
-#                 FROM information_schema.columns
-#                 WHERE table_schema = DATABASE()
-#                   AND table_name = :t
-#                   AND column_name = :c
-#             """), {"t": table_name, "c": column_name}).mappings().fetchone()
-#             return row and int(row["cnt"]) > 0
+def ensure_aadhar_storage_columns():
+    try:
+        def _col_exists(table_name: str, column_name: str) -> bool:
+            row = db.session.execute(sql_text("""
+                SELECT COUNT(*) AS cnt
+                FROM information_schema.columns
+                WHERE table_schema = DATABASE()
+                  AND table_name = :t
+                  AND column_name = :c
+            """), {"t": table_name, "c": column_name}).mappings().fetchone()
+            return row and int(row["cnt"]) > 0
 
-#         def _idx_exists(table_name: str, index_name: str) -> bool:
-#             row = db.session.execute(sql_text("""
-#                 SELECT 1
-#                 FROM information_schema.statistics
-#                 WHERE table_schema = DATABASE()
-#                   AND table_name = :t
-#                   AND index_name = :i
-#                 LIMIT 1
-#             """), {"t": table_name, "i": index_name}).mappings().fetchone()
-#             return bool(row)
+        def _idx_exists(table_name: str, index_name: str) -> bool:
+            row = db.session.execute(sql_text("""
+                SELECT 1
+                FROM information_schema.statistics
+                WHERE table_schema = DATABASE()
+                  AND table_name = :t
+                  AND index_name = :i
+                LIMIT 1
+            """), {"t": table_name, "i": index_name}).mappings().fetchone()
+            return bool(row)
 
-#         if _col_exists("persons", "aadhar") and not _col_exists("persons", "aadhar_hash"):
-#             db.session.execute(sql_text("""
-#                 ALTER TABLE persons
-#                 ADD COLUMN aadhar_hash VARCHAR(64) NULL
-#             """))
-#         if _col_exists("persons", "aadhar_hash") and not _idx_exists("persons", "idx_persons_aadhar_hash"):
-#             db.session.execute(sql_text("""
-#                 CREATE INDEX idx_persons_aadhar_hash ON persons (aadhar_hash)
-#             """))
+        if _col_exists("persons", "aadhar") and not _col_exists("persons", "aadhar_hash"):
+            db.session.execute(sql_text("""
+                ALTER TABLE persons
+                ADD COLUMN aadhar_hash VARCHAR(64) NULL
+            """))
+        if _col_exists("persons", "aadhar_hash") and not _idx_exists("persons", "idx_persons_aadhar_hash"):
+            db.session.execute(sql_text("""
+                CREATE INDEX idx_persons_aadhar_hash ON persons (aadhar_hash)
+            """))
 
-#         if not _col_exists("individual_questionnaire_responses", "aadhar_hash"):
-#             db.session.execute(sql_text("""
-#                 ALTER TABLE individual_questionnaire_responses
-#                 ADD COLUMN aadhar_hash VARCHAR(64) NULL
-#             """))
-#         if _col_exists("individual_questionnaire_responses", "aadhar_hash") and not _idx_exists("individual_questionnaire_responses", "idx_iqr_aadhar_hash"):
-#             db.session.execute(sql_text("""
-#                 CREATE INDEX idx_iqr_aadhar_hash ON individual_questionnaire_responses (aadhar_hash)
-#             """))
+        if not _col_exists("individual_questionnaire_responses", "aadhar_hash"):
+            db.session.execute(sql_text("""
+                ALTER TABLE individual_questionnaire_responses
+                ADD COLUMN aadhar_hash VARCHAR(64) NULL
+            """))
+        if _col_exists("individual_questionnaire_responses", "aadhar_hash") and not _idx_exists("individual_questionnaire_responses", "idx_iqr_aadhar_hash"):
+            db.session.execute(sql_text("""
+                CREATE INDEX idx_iqr_aadhar_hash ON individual_questionnaire_responses (aadhar_hash)
+            """))
 
-#         db.session.commit()
-#     except Exception:
-#         db.session.rollback()
-#         print("=== ERROR ENSURING AADHAAR STORAGE COLUMNS ===")
-#         print(traceback.format_exc())
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+        print("=== ERROR ENSURING AADHAAR STORAGE COLUMNS ===")
+        print(traceback.format_exc())
+
+
+@app.route("/__init_db__", methods=["POST"])
+def init_db():
+    try:
+        with app.app_context():
+            ensure_questionnaire_tables()
+            ensure_household_name_unique_index()
+            ensure_aadhar_storage_columns()
+        return "✅ Database schema created successfully", 200
+    except Exception:
+        return traceback.format_exc(), 500
 
 # ==========================================================
 # DATABASE SCHEMA INITIALIZATION (RAILWAY ONLY)
@@ -2059,7 +2073,7 @@ def complete_household_survey():
                 UPDATE main_questionnaire_responses
                 SET responses = :resp
                 WHERE main_questionnaire_id = :mid
-            """), {"resp": json.dumps(payload), "mid": main_id})
+            """), {"resp": payload, "mid": main_id})
 
         _ensure_survey_contributor(main_id, user_id)
         db.session.commit()
@@ -2704,14 +2718,8 @@ def admin_export_household_responses():
             "village_lgd_code",
             "main_questionnaire_id",
             "individual_questionnaire_id",
-            "member_aadhar",
             "member_name",
-            "section_order",
-            "section_title",
-            "question_order",
-            "question_id",
-            "question_text",
-            "answer",
+            "member_aadhar",
             "submitted_at",
             "submitted_by",
         ]
@@ -2824,6 +2832,9 @@ def admin_export_main_wide():
             "village_name",
             "village_lgd_code",
             "main_questionnaire_id",
+            "individual_questionnaire_id",
+            "member_name",
+            "member_aadhar",
             "submitted_at",
             "submitted_by",
         ] + q_headers
@@ -2842,6 +2853,9 @@ def admin_export_main_wide():
                 "village_name": r.get("village_name") or "",
                 "village_lgd_code": r.get("village_lgd_code") or "",
                 "main_questionnaire_id": r.get("main_questionnaire_id") or "",
+                "individual_questionnaire_id": r.get("individual_questionnaire_id") or "",
+                "member_name": " ".join([member.get("first_name", ""), member.get("middle_name", ""), member.get("surname", "")]).strip(),
+                "member_aadhar": member.get("aadhar") or "",
                 "submitted_at": (payload or {}).get("submitted_at") or "",
                 "submitted_by": (payload or {}).get("submitted_by_username") or "",
             }
@@ -4564,6 +4578,17 @@ def initialize_survey():
 # ==========================================================
 # RUN
 # ==========================================================
+
+@app.route("/__init_db__", methods=["POST"])
+def init_db():
+    try:
+        with app.app_context():
+            ensure_questionnaire_tables()
+            ensure_household_name_unique_index()
+            ensure_aadhar_storage_columns()
+        return "✅ Database schema created successfully", 200
+    except Exception:
+        return traceback.format_exc(), 500
 
 if __name__ == "__main__":
     app.run(debug=True)
