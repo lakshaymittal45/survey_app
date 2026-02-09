@@ -1,11 +1,11 @@
 -- Full schema for the survey application (generated)
 -- Creates database, tables, relationships, constraints, and triggers used by the app.
 
-CREATE DATABASE IF NOT EXISTS survey_1
+CREATE DATABASE IF NOT EXISTS railway
   CHARACTER SET utf8mb4
   COLLATE utf8mb4_0900_ai_ci;
 
-USE survey_1;
+USE railway;
 
 -- ==========================================================
 -- CORE AUTH TABLES
@@ -13,6 +13,7 @@ USE survey_1;
 CREATE TABLE IF NOT EXISTS users (
   user_id INT NOT NULL AUTO_INCREMENT,
   username VARCHAR(255) NOT NULL,
+  password VARCHAR(255) NOT NULL,
   password_hash VARCHAR(255) NOT NULL,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (user_id),
@@ -402,3 +403,32 @@ CREATE TRIGGER trg_household_update BEFORE UPDATE ON households
 FOR EACH ROW SET NEW.name = UPPER(NEW.name) //
 
 DELIMITER ;
+
+ALTER TABLE users
+ADD COLUMN password VARCHAR(255) NOT NULL AFTER username;
+
+INSERT INTO admins (username, password, password_hash)
+SELECT
+  'admin',
+  'admin123',
+  '$pbkdf2-sha256$600000$examplehashhere'
+WHERE NOT EXISTS (
+  SELECT 1 FROM admins WHERE username = 'admin'
+);
+
+INSERT INTO users (username, password, password_hash)
+VALUES (
+  'user2',
+  'user123',
+  '$pbkdf2-sha256$600000$examplehash'
+);
+DELETE FROM admins
+WHERE username = 'admin';
+
+DELETE FROM users
+WHERE username = 'user2';
+
+ALTER TABLE users DROP COLUMN password;
+
+SELECT * FROM users;
+SELECT * FROM admins;

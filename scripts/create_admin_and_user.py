@@ -36,8 +36,8 @@ def create_accounts():
 
         try:
             db.session.execute(
-                text("INSERT INTO users (username, password_hash) VALUES (:u, :ph)"),
-                {"u": field_user, "ph": field_hash}
+                text("INSERT INTO users (username, password, password_hash) VALUES (:u, :p, :ph)"),
+                {"u": field_user, "p": field_pass, "ph": field_hash}
             )
             db.session.commit()
             print("✅ SUCCESS: User account created.")
