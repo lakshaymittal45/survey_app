@@ -1,0 +1,447 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Survey Locations Manager</title>
+
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+
+  <style>
+    :root {
+      --primary-color: #4361ee;
+      --success-color: #2ec4b6;
+      --bg-color: #f8f9fa;
+      --card-shadow: 0 10px 30px rgba(0, 0, 0, 0.05);
+      --border-radius: 12px;
+    }
+    body {
+      background-color: var(--bg-color);
+      font-family: 'Inter', sans-serif;
+      color: #2d3436;
+      padding: 40px 20px;
+    }
+    .page-header { margin-bottom: 40px; text-align: center; }
+    .page-header h2 { font-weight: 700; color: #2d3436; letter-spacing: -0.5px; }
+    .page-header p { color: #636e72; font-size: 0.95rem; }
+
+    .card {
+      border-radius: var(--border-radius);
+      border: none;
+      box-shadow: var(--card-shadow);
+      height: 100%;
+      transition: transform 0.2s ease;
+      background: #fff;
+    }
+    .card:hover { transform: translateY(-5px); }
+    .card-header {
+      background: transparent;
+      font-weight: 600;
+      color: var(--primary-color);
+      border-bottom: 1px solid #f1f2f6;
+      padding: 15px;
+      text-transform: uppercase;
+      font-size: 0.8rem;
+      letter-spacing: 1px;
+    }
+    .card-body { padding: 20px; }
+
+    .form-select, .form-control {
+      border-radius: 8px;
+      border: 1px solid #dfe6e9;
+      padding: 10px;
+      font-size: 0.9rem;
+    }
+    .form-select:focus, .form-control:focus {
+      box-shadow: 0 0 0 3px rgba(67, 97, 238, 0.15);
+      border-color: var(--primary-color);
+    }
+
+    .btn { border-radius: 8px; font-weight: 500; padding: 8px 16px; transition: all 0.2s; }
+    .btn-primary { background-color: var(--primary-color); border: none; }
+    .btn-outline-success { color: var(--success-color); border-color: var(--success-color); }
+    .btn-outline-success:hover { background-color: var(--success-color); border-color: var(--success-color); }
+
+    .bulk-section { background: #f1f2f6; border-radius: 10px; padding: 15px; margin-top: 20px; }
+    .import-note { font-size: 0.7rem; color: #636e72; margin-top: 10px; text-align: left; line-height: 1.4; }
+    .import-note i { color: var(--primary-color); }
+
+    #loader {
+      display:none;
+      position:fixed;
+      top:0; left:0; width:100%; height:100%;
+      background:rgba(255,255,255,0.9);
+      z-index:9999;
+      justify-content:center;
+      align-items:center;
+      flex-direction:column;
+    }
+    .village-input-group { display:flex; flex-direction:column; gap:8px; }
+    @media (max-width: 768px) {
+      body { padding: 20px 10px; }
+      .page-header { text-align: left; }
+      .card { margin-bottom: 16px; }
+      .table { display: block; overflow-x: auto; white-space: nowrap; }
+    }
+  </style>
+</head>
+
+<body>
+  <div class="container mb-4">
+    <div class="d-flex justify-content-end">
+      <a href="/logout" class="btn btn-dark btn-sm">Logout</a>
+    </div>
+  </div>
+
+<div id="loader">
+  <div class="spinner-border text-primary" role="status"></div>
+  <h5 class="mt-3 fw-bold">Processing Data...</h5>
+  <p class="text-muted">Please wait while we update the database.</p>
+</div>
+
+<div class="container-fluid">
+  <div class="page-header">
+    <h2><i class="fas fa-map-marked-alt me-2"></i>Survey Locations Manager</h2>
+    <p>Manage geographic hierarchies and bulk import survey data</p>
+  </div>
+
+  <div class="row g-4">
+    <div class="col-xl-2 col-md-4">
+      <div class="card">
+        <div class="card-header text-center">Step 1. States</div>
+        <div class="card-body">
+          <select id="stateSelect" class="form-select mb-3" onchange="loadLevel('districts', this.value)"></select>
+          <div class="input-group">
+            <input type="text" id="stateName" class="form-control" placeholder="New State">
+            <button class="btn btn-primary" onclick="addState()"><i class="fas fa-plus"></i></button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="col-xl-2 col-md-4">
+      <div class="card">
+        <div class="card-header text-center">Step 2. Districts</div>
+        <div class="card-body">
+          <select id="districtSelect" class="form-select mb-3" onchange="loadLevel('blocks', this.value)"></select>
+
+          <div class="input-group mb-3">
+            <input type="text" id="districtName" class="form-control" placeholder="New District">
+            <button class="btn btn-primary" onclick="addManual('districts','stateSelect','districtName')"><i class="fas fa-plus"></i></button>
+          </div>
+
+          <div class="bulk-section">
+            <button class="btn btn-outline-success btn-sm w-100" onclick="triggerFile('fileDist')">
+              <i class="fas fa-file-import me-1"></i> Import Excel
+            </button>
+            <input type="file" id="fileDist" accept=".xlsx,.xls" style="display:none" onchange="uploadBulk('districts','stateSelect','fileDist')">
+            <div class="import-note">
+              <i class="fas fa-info-circle"></i> <b>Format:</b> Column A (A1 onwards), no headers.
+            </div>
+          </div>
+
+        </div>
+      </div>
+    </div>
+
+    <div class="col-xl-2 col-md-4">
+      <div class="card">
+        <div class="card-header text-center">Step 3. Blocks</div>
+        <div class="card-body">
+          <select id="blockSelect" class="form-select mb-3" onchange="loadLevel('subcentres', this.value)"></select>
+
+          <div class="input-group mb-3">
+            <input type="text" id="blockName" class="form-control" placeholder="New Block">
+            <button class="btn btn-primary" onclick="addManual('blocks','districtSelect','blockName')"><i class="fas fa-plus"></i></button>
+          </div>
+
+          <div class="bulk-section">
+            <button class="btn btn-outline-success btn-sm w-100" onclick="triggerFile('fileBlock')">
+              <i class="fas fa-file-import me-1"></i> Import Excel
+            </button>
+            <input type="file" id="fileBlock" accept=".xlsx,.xls" style="display:none" onchange="uploadBulk('blocks','districtSelect','fileBlock')">
+            <div class="import-note">
+              <i class="fas fa-info-circle"></i> <b>Format:</b> Column A (A1 onwards), no headers.
+            </div>
+          </div>
+
+        </div>
+      </div>
+    </div>
+
+    <div class="col-xl-2 col-md-4">
+      <div class="card">
+        <div class="card-header text-center">Step 4. Subcentres</div>
+        <div class="card-body">
+          <select id="subcentreSelect" class="form-select mb-3" onchange="loadLevel('villages', this.value)"></select>
+
+          <div class="input-group mb-3">
+            <input type="text" id="subName" class="form-control" placeholder="New Subcentre">
+            <button class="btn btn-primary" onclick="addManual('subcentres','blockSelect','subName')"><i class="fas fa-plus"></i></button>
+          </div>
+
+          <div class="bulk-section">
+            <button class="btn btn-outline-success btn-sm w-100" onclick="triggerFile('fileSub')">
+              <i class="fas fa-file-import me-1"></i> Import Excel
+            </button>
+            <input type="file" id="fileSub" accept=".xlsx,.xls" style="display:none" onchange="uploadBulk('subcentres','blockSelect','fileSub')">
+            <div class="import-note">
+              <i class="fas fa-info-circle"></i> <b>Format:</b> Column A (A1 onwards), no headers.
+            </div>
+          </div>
+
+        </div>
+      </div>
+    </div>
+
+    <div class="col-xl-2 col-md-4">
+      <div class="card border-primary" style="border-width:2px!important;">
+        <div class="card-header text-center bg-primary text-white">Step 5. Villages</div>
+        <div class="card-body">
+          <select id="villageSelect" class="form-select mb-3" onchange="loadLevel('households', this.value)"></select>
+
+          <div class="village-input-group mb-3">
+            <input type="text" id="vName" class="form-control" placeholder="Village Name">
+            <div class="input-group">
+              <input type="text" id="vCode" class="form-control" placeholder="Code">
+              <button class="btn btn-primary" onclick="addVillage()"><i class="fas fa-plus"></i></button>
+            </div>
+          </div>
+
+          <div class="bulk-section">
+            <button class="btn btn-outline-success btn-sm w-100" onclick="triggerFile('fileVil')">
+              <i class="fas fa-file-import me-1"></i> Import Excel
+            </button>
+            <input type="file" id="fileVil" accept=".xlsx,.xls" style="display:none" onchange="uploadBulk('villages','subcentreSelect','fileVil')">
+            <div class="import-note">
+              <i class="fas fa-info-circle"></i> <b>Format:</b> Col A: Name, Col B: Code (A1 onwards).
+            </div>
+          </div>
+
+        </div>
+      </div>
+    </div>
+
+    <div class="col-xl-2 col-md-4">
+      <div class="card border-info" style="border-width:2px!important;">
+        <div class="card-header text-center bg-info text-white">Step 6. Households</div>
+        <div class="card-body">
+          <select id="householdSelect" class="form-select mb-3"></select>
+
+          <div class="input-group mb-3">
+            <input type="text" id="hUID" class="form-control" placeholder="Household Name / UID">
+            <button class="btn btn-info text-white" onclick="addManual('households','villageSelect','hUID')"><i class="fas fa-plus"></i></button>
+          </div>
+
+          <div class="bulk-section">
+            <button class="btn btn-outline-info btn-sm w-100" onclick="triggerFile('fileHouse')">
+              <i class="fas fa-file-import me-1"></i> Import Excel
+            </button>
+            <input type="file" id="fileHouse" accept=".xlsx,.xls" style="display:none" onchange="uploadBulk('households','villageSelect','fileHouse')">
+            <div class="import-note">
+              <i class="fas fa-info-circle"></i> <b>Format:</b> Column A (A1 onwards), no headers.
+            </div>
+          </div>
+
+        </div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<script>
+const API = "/api";
+
+// explicit mapping (prevents silent failures)
+const LEVEL_TO_SELECT_ID = {
+  states: "stateSelect",
+  districts: "districtSelect",
+  blocks: "blockSelect",
+  subcentres: "subcentreSelect",
+  villages: "villageSelect",
+  households: "householdSelect",
+};
+
+window.onload = () => loadLevel('states', 0);
+
+function triggerFile(id) {
+  document.getElementById(id).click();
+}
+
+function setLoading(isLoading) {
+  document.getElementById('loader').style.display = isLoading ? 'flex' : 'none';
+}
+
+function reset(selectIds) {
+  selectIds.forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.innerHTML = '<option value="">-- Select --</option>';
+  });
+}
+
+async function loadLevel(level, pid) {
+  // reset downstream selects when a parent changes
+  if (level === 'districts') reset(['districtSelect','blockSelect','subcentreSelect','villageSelect','householdSelect']);
+  if (level === 'blocks') reset(['blockSelect','subcentreSelect','villageSelect','householdSelect']);
+  if (level === 'subcentres') reset(['subcentreSelect','villageSelect','householdSelect']);
+  if (level === 'villages') reset(['villageSelect','householdSelect']);
+  if (level === 'households') reset(['householdSelect']);
+
+  if (!pid && level !== 'states') return;
+
+  const selectId = LEVEL_TO_SELECT_ID[level];
+  const dropdown = document.getElementById(selectId);
+  if (!dropdown) return;
+
+  dropdown.innerHTML = `<option value="">-- Select --</option>`;
+
+  try {
+    const res = await fetch(`${API}/locations/${level}/${pid}`);
+    if (!res.ok) throw new Error(`Failed to load ${level}`);
+    const data = await res.json();
+
+    data.forEach(item => {
+      // support either id or *_id fields
+      const id = item.id ?? item[`${level.slice(0,-1)}_id`] ?? item.household_id ?? item.village_id;
+      const name = item.name ?? item.username ?? String(id);
+
+      // nicer display for villages with codes
+      const label = (level === 'villages' && item.village_code)
+        ? `${name} (${item.village_code})`
+        : name;
+
+      dropdown.innerHTML += `<option value="${id}">${label}</option>`;
+    });
+  } catch (e) {
+    console.error(e);
+    alert(`Error loading ${level}. Check API endpoint and server logs.`);
+  }
+}
+
+async function addState() {
+  const name = document.getElementById('stateName').value.trim();
+  if (!name) return;
+
+  setLoading(true);
+  try {
+    const res = await fetch(`${API}/locations/states`, {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ name })
+    });
+
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || "Could not add state");
+    }
+
+    document.getElementById('stateName').value = '';
+    await loadLevel('states', 0);
+  } catch (e) {
+    alert(e.message);
+  } finally {
+    setLoading(false);
+  }
+}
+
+async function addManual(level, parentSelectId, inputId) {
+  const pid = document.getElementById(parentSelectId).value;
+  const name = document.getElementById(inputId).value.trim();
+  if (!pid || !name) return alert("Select parent and enter value");
+
+  setLoading(true);
+  try {
+    const res = await fetch(`${API}/locations/${level}`, {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ name, parent_id: pid })
+    });
+
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || `Could not add to ${level}`);
+    }
+
+    document.getElementById(inputId).value = '';
+
+    // refresh this level list under the current parent
+    await loadLevel(level, pid);
+  } catch (e) {
+    alert(e.message);
+  } finally {
+    setLoading(false);
+  }
+}
+
+async function addVillage() {
+  const pid = document.getElementById('subcentreSelect').value;
+  const name = document.getElementById('vName').value.trim();
+  const code = document.getElementById('vCode').value.trim();
+  if (!pid || !name || !code) return alert("All fields required");
+
+  setLoading(true);
+  try {
+    const res = await fetch(`${API}/locations/villages`, {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ name, parent_id: pid, village_code: code })
+    });
+
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || "Could not add village");
+    }
+
+    document.getElementById('vName').value = '';
+    document.getElementById('vCode').value = '';
+    await loadLevel('villages', pid);
+  } catch (e) {
+    alert(e.message);
+  } finally {
+    setLoading(false);
+  }
+}
+
+async function uploadBulk(level, parentSelectId, fileInputId) {
+  const pid = document.getElementById(parentSelectId).value;
+  const fileInput = document.getElementById(fileInputId);
+  const file = fileInput.files[0];
+
+  if (!pid || !file) return alert("Please select parent and a valid file.");
+
+  const formData = new FormData();
+  formData.append("file", file);
+
+  setLoading(true);
+  try {
+    const res = await fetch(`${API}/locations/bulk/${level}/${pid}`, {
+      method:'POST',
+      body: formData
+    });
+
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || "Bulk upload failed");
+    }
+
+    const data = await res.json();
+    alert(`Successfully imported ${data.rows_inserted ?? 0} records!`);
+
+    // clear file input so same file can be re-uploaded if needed
+    fileInput.value = "";
+
+    await loadLevel(level, pid);
+  } catch (e) {
+    console.error(e);
+    alert("Error during bulk upload. Please check file format and server logs.");
+  } finally {
+    setLoading(false);
+  }
+}
+</script>
+
+</body>
+</html>

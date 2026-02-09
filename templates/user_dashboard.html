@@ -1,0 +1,730 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Survey Application - User Dashboard</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            color: #333;
+        }
+
+        .navbar {
+            background: rgba(255, 255, 255, 0.95);
+            backdrop-filter: blur(10px);
+            padding: 15px 20px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            box-shadow: 0 2px 20px rgba(0,0,0,0.1);
+        }
+
+        .nav-brand {
+            font-size: 1.3em;
+            font-weight: bold;
+            color: #667eea;
+        }
+
+        .nav-right {
+            display: flex;
+            align-items: center;
+            gap: 20px;
+        }
+
+        .user-info {
+            color: #666;
+            font-weight: 500;
+        }
+
+        .nav-link {
+            color: #667eea;
+            text-decoration: none;
+            cursor: pointer;
+            transition: opacity 0.3s;
+            font-weight: 600;
+        }
+
+        .nav-link:hover {
+            opacity: 0.7;
+        }
+
+        .container {
+            max-width: 900px;
+            margin: 0 auto;
+            padding: 40px 20px;
+        }
+
+        .welcome-card {
+            background: white;
+            padding: 30px;
+            border-radius: 12px;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.15);
+            margin-bottom: 30px;
+            text-align: center;
+        }
+
+        .welcome-card h1 {
+            color: #2c3e50;
+            margin-bottom: 10px;
+            font-size: 2em;
+        }
+
+        .welcome-card p {
+            color: #666;
+            font-size: 1.1em;
+        }
+
+        .main-card {
+            background: white;
+            padding: 40px;
+            border-radius: 12px;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.15);
+        }
+
+        h2 {
+            color: #2c3e50;
+            margin-bottom: 25px;
+            font-size: 1.8em;
+            border-bottom: 3px solid #667eea;
+            padding-bottom: 10px;
+        }
+
+        .form-row {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 20px;
+            margin-bottom: 20px;
+        }
+
+        .form-group {
+            display: flex;
+            flex-direction: column;
+        }
+
+        label {
+            font-weight: 600;
+            color: #2c3e50;
+            margin-bottom: 8px;
+            font-size: 0.95em;
+        }
+
+        label .required {
+            color: #dc3545;
+            margin-left: 3px;
+        }
+
+        input[type="text"],
+        select {
+            padding: 12px;
+            border: 2px solid #e0e0e0;
+            border-radius: 8px;
+            font-family: inherit;
+            font-size: 1em;
+            transition: all 0.3s;
+            background: white;
+        }
+
+        input:focus, 
+        select:focus {
+            outline: none;
+            border-color: #667eea;
+            box-shadow: 0 0 0 4px rgba(102, 126, 234, 0.1);
+        }
+
+        select:disabled,
+        input:disabled {
+            background: #f5f5f5;
+            cursor: not-allowed;
+            opacity: 0.6;
+        }
+
+        .btn {
+            padding: 14px 30px;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            font-weight: 600;
+            transition: all 0.3s;
+            font-size: 1em;
+            margin-top: 10px;
+        }
+
+        .btn-primary {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            width: 100%;
+        }
+
+        .btn-primary:hover:not(:disabled) {
+            transform: translateY(-2px);
+            box-shadow: 0 8px 25px rgba(102, 126, 234, 0.4);
+        }
+
+        .btn-primary:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+            transform: none;
+        }
+
+        .message {
+            padding: 15px 20px;
+            border-radius: 8px;
+            margin-bottom: 25px;
+            display: none;
+            animation: slideIn 0.3s;
+            font-weight: 500;
+        }
+
+        @keyframes slideIn {
+            from {
+                opacity: 0;
+                transform: translateY(-10px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        .message.show {
+            display: block;
+        }
+
+        .message.success {
+            background: #d4edda;
+            color: #155724;
+            border: 2px solid #c3e6cb;
+        }
+
+        .message.error {
+            background: #f8d7da;
+            color: #721c24;
+            border: 2px solid #f5c6cb;
+        }
+
+        .info-box {
+            background: #e7f3ff;
+            border-left: 4px solid #2196F3;
+            padding: 15px;
+            border-radius: 6px;
+            margin-bottom: 25px;
+            color: #0c5460;
+        }
+
+        .info-box strong {
+            display: block;
+            margin-bottom: 5px;
+            color: #004085;
+        }
+
+        .loading {
+            display: inline-block;
+            width: 16px;
+            height: 16px;
+            border: 3px solid rgba(255,255,255,0.3);
+            border-radius: 50%;
+            border-top-color: white;
+            animation: spin 0.8s linear infinite;
+            margin-right: 8px;
+            vertical-align: middle;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        .helper-text {
+            font-size: 0.85em;
+            color: #666;
+            margin-top: 5px;
+            font-style: italic;
+        }
+
+        @media (max-width: 768px) {
+            .navbar {
+                flex-direction: column;
+                align-items: flex-start;
+                gap: 10px;
+            }
+            .nav-right {
+                flex-wrap: wrap;
+                gap: 10px;
+            }
+            .container {
+                padding: 20px 16px;
+            }
+            .main-card {
+                padding: 24px;
+            }
+            .form-row {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        @media (max-width: 480px) {
+            .welcome-card {
+                padding: 20px;
+            }
+            .main-card {
+                padding: 20px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <nav class="navbar">
+        <div class="nav-left">
+            <span class="nav-brand">Survey System</span>
+        </div>
+        <div class="nav-right">
+            <span class="user-info" id="userInfo">Loading...</span>
+            <a href="#" class="nav-link" onclick="handleUserLogout()">Logout</a>
+        </div>
+    </nav>
+
+    <div class="container">
+        <div class="welcome-card">
+            <h1>Welcome to Survey System</h1>
+            <p>Create a new household to begin the survey</p>
+        </div>
+
+        <div class="main-card">
+            <h2>Create New Household</h2>
+
+            <div id="message" class="message"></div>
+
+            <div class="info-box">
+                <strong>Instructions:</strong>
+                Please fill in all the required fields to create a household. Select locations in order: State → District → Block → Sub-Center → Village.
+            </div>
+
+            <form id="householdForm">
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>
+                            Household Name
+                            <span class="required">*</span>
+                        </label>
+                        <input 
+                            type="text" 
+                            id="householdName" 
+                            placeholder="Enter household name" 
+                            required
+                        >
+                    </div>
+                </div>
+
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>
+                            State
+                            <span class="required">*</span>
+                        </label>
+                        <select id="state" required>
+                            <option value="">Select State</option>
+                        </select>
+                    </div>
+
+                    <div class="form-group">
+                        <label>
+                            District
+                            <span class="required">*</span>
+                        </label>
+                        <select id="district" disabled required>
+                            <option value="">Select State first</option>
+                        </select>
+                    </div>
+                </div>
+
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>
+                            Block
+                            <span class="required">*</span>
+                        </label>
+                        <select id="block" disabled required>
+                            <option value="">Select District first</option>
+                        </select>
+                    </div>
+
+                    <div class="form-group">
+                        <label>
+                            Sub-Center
+                            <span class="required">*</span>
+                        </label>
+                        <select id="subCenter" disabled required>
+                            <option value="">Select Block first</option>
+                        </select>
+                    </div>
+                </div>
+
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>
+                            Village
+                            <span class="required">*</span>
+                        </label>
+                        <select id="village" disabled required>
+                            <option value="">Select Sub-Center first</option>
+                        </select>
+                        <div class="helper-text" id="villageHelper"></div>
+                    </div>
+                </div>
+
+                <button type="submit" class="btn btn-primary" id="submitBtn">
+                    Create Household & Start Survey
+                </button>
+            </form>
+        </div>
+    </div>
+
+    <script>
+        // Get username from server-side session
+        fetch('/api/current-user')
+            .then(r => r.json())
+            .then(data => {
+                document.getElementById('userInfo').textContent = `Logged in as: ${data.username || 'User'}`;
+            })
+            .catch(() => {
+                document.getElementById('userInfo').textContent = 'User Dashboard';
+            });
+
+        const HOUSEHOLD_DRAFT_KEY = 'household_draft_v1';
+
+        function saveDraft() {
+            try {
+                const payload = {
+                    householdName: householdNameInput.value || '',
+                    stateId: stateSelect.value || '',
+                    districtId: districtSelect.value || '',
+                    blockId: blockSelect.value || '',
+                    subCenterId: subCenterSelect.value || '',
+                    villageId: villageSelect.value || ''
+                };
+                localStorage.setItem(HOUSEHOLD_DRAFT_KEY, JSON.stringify(payload));
+            } catch (e) {
+                // ignore storage errors
+            }
+        }
+
+        function loadDraft() {
+            try {
+                const raw = localStorage.getItem(HOUSEHOLD_DRAFT_KEY);
+                if (!raw) return null;
+                return JSON.parse(raw);
+            } catch (e) {
+                return null;
+            }
+        }
+
+        function clearDraft() {
+            try { localStorage.removeItem(HOUSEHOLD_DRAFT_KEY); } catch (e) {}
+        }
+
+        function handleUserLogout() {
+            saveDraft();
+            window.location.href = '/logout';
+        }
+
+        // State management
+        let selectedState = null;
+        let selectedDistrict = null;
+        let selectedBlock = null;
+        let selectedSubCenter = null;
+
+        // DOM elements
+        const stateSelect = document.getElementById('state');
+        const districtSelect = document.getElementById('district');
+        const blockSelect = document.getElementById('block');
+        const subCenterSelect = document.getElementById('subCenter');
+        const villageSelect = document.getElementById('village');
+        const householdNameInput = document.getElementById('householdName');
+        const submitBtn = document.getElementById('submitBtn');
+
+        // Load states on page load
+        loadStates();
+
+        async function loadStates() {
+            try {
+                const response = await fetch('/api/states');
+                const states = await response.json();
+                
+                stateSelect.innerHTML = '<option value="">Select State</option>';
+                states.forEach(state => {
+                    const option = document.createElement('option');
+                    option.value = state.state_id;
+                    option.textContent = `${state.name} (${state.territory_type})`;
+                    stateSelect.appendChild(option);
+                });
+                await applyDraftSelections();
+            } catch (error) {
+                showMessage('Error loading states: ' + error.message, 'error');
+            }
+        }
+
+        async function loadDistricts(stateId) {
+            districtSelect.innerHTML = '<option value="">Loading...</option>';
+            districtSelect.disabled = true;
+            blockSelect.innerHTML = '<option value="">Select District first</option>';
+            blockSelect.disabled = true;
+            subCenterSelect.innerHTML = '<option value="">Select Block first</option>';
+            subCenterSelect.disabled = true;
+            villageSelect.innerHTML = '<option value="">Select Sub-Center first</option>';
+            villageSelect.disabled = true;
+
+            if (!stateId) {
+                districtSelect.innerHTML = '<option value="">Select State first</option>';
+                return;
+            }
+
+            try {
+                const response = await fetch(`/api/districts/${stateId}`);
+                const districts = await response.json();
+                districtSelect.innerHTML = '<option value="">Select District</option>';
+                districts.forEach(district => {
+                    const option = document.createElement('option');
+                    option.value = district.district_id;
+                    option.textContent = district.name;
+                    districtSelect.appendChild(option);
+                });
+                districtSelect.disabled = false;
+            } catch (error) {
+                showMessage('Error loading districts: ' + error.message, 'error');
+                districtSelect.innerHTML = '<option value="">Error loading districts</option>';
+            }
+        }
+
+        async function loadBlocks(districtId) {
+            blockSelect.innerHTML = '<option value="">Loading...</option>';
+            blockSelect.disabled = true;
+            subCenterSelect.innerHTML = '<option value="">Select Block first</option>';
+            subCenterSelect.disabled = true;
+            villageSelect.innerHTML = '<option value="">Select Sub-Center first</option>';
+            villageSelect.disabled = true;
+
+            if (!districtId) {
+                blockSelect.innerHTML = '<option value="">Select District first</option>';
+                return;
+            }
+
+            try {
+                const response = await fetch(`/api/blocks/${districtId}`);
+                const blocks = await response.json();
+                blockSelect.innerHTML = '<option value="">Select Block</option>';
+                blocks.forEach(block => {
+                    const option = document.createElement('option');
+                    option.value = block.block_id;
+                    option.textContent = block.name;
+                    blockSelect.appendChild(option);
+                });
+                blockSelect.disabled = false;
+            } catch (error) {
+                showMessage('Error loading blocks: ' + error.message, 'error');
+                blockSelect.innerHTML = '<option value="">Error loading blocks</option>';
+            }
+        }
+
+        async function loadSubCenters(blockId) {
+            subCenterSelect.innerHTML = '<option value="">Loading...</option>';
+            subCenterSelect.disabled = true;
+            villageSelect.innerHTML = '<option value="">Select Sub-Center first</option>';
+            villageSelect.disabled = true;
+
+            if (!blockId) {
+                subCenterSelect.innerHTML = '<option value="">Select Block first</option>';
+                return;
+            }
+
+            try {
+                const response = await fetch(`/api/sub-centers/${blockId}`);
+                const subCenters = await response.json();
+                subCenterSelect.innerHTML = '<option value="">Select Sub-Center</option>';
+                subCenters.forEach(subCenter => {
+                    const option = document.createElement('option');
+                    option.value = subCenter.sub_center_id;
+                    option.textContent = subCenter.name;
+                    subCenterSelect.appendChild(option);
+                });
+                subCenterSelect.disabled = false;
+            } catch (error) {
+                showMessage('Error loading sub-centers: ' + error.message, 'error');
+                subCenterSelect.innerHTML = '<option value="">Error loading sub-centers</option>';
+            }
+        }
+
+        async function loadVillages(subCenterId) {
+            villageSelect.innerHTML = '<option value="">Loading...</option>';
+            villageSelect.disabled = true;
+
+            if (!subCenterId) {
+                villageSelect.innerHTML = '<option value="">Select Sub-Center first</option>';
+                return;
+            }
+
+            try {
+                const response = await fetch(`/api/villages/by-subcenter/${subCenterId}`);
+                const villages = await response.json();
+                villageSelect.innerHTML = '<option value="">Select Village</option>';
+                villages.forEach(village => {
+                    const option = document.createElement('option');
+                    option.value = village.village_id;
+                    option.textContent = village.name;
+                    villageSelect.appendChild(option);
+                });
+                villageSelect.disabled = false;
+
+                if (villages.length === 0) {
+                    document.getElementById('villageHelper').textContent =
+                        'No villages found for this sub-center. Please contact administrator.';
+                } else {
+                    document.getElementById('villageHelper').textContent = '';
+                }
+            } catch (error) {
+                showMessage('Error loading villages: ' + error.message, 'error');
+                villageSelect.innerHTML = '<option value="">Error loading villages</option>';
+            }
+        }
+
+        async function applyDraftSelections() {
+            const draft = loadDraft();
+            if (!draft) return;
+
+            householdNameInput.value = draft.householdName || '';
+            if (draft.stateId) {
+                stateSelect.value = draft.stateId;
+                selectedState = draft.stateId;
+                await loadDistricts(draft.stateId);
+            }
+            if (draft.districtId) {
+                districtSelect.value = draft.districtId;
+                selectedDistrict = draft.districtId;
+                await loadBlocks(draft.districtId);
+            }
+            if (draft.blockId) {
+                blockSelect.value = draft.blockId;
+                selectedBlock = draft.blockId;
+                await loadSubCenters(draft.blockId);
+            }
+            if (draft.subCenterId) {
+                subCenterSelect.value = draft.subCenterId;
+                selectedSubCenter = draft.subCenterId;
+                await loadVillages(draft.subCenterId);
+            }
+            if (draft.villageId) {
+                villageSelect.value = draft.villageId;
+            }
+        }
+
+        householdNameInput.addEventListener('input', saveDraft);
+
+        stateSelect.addEventListener('change', async function() {
+            const stateId = this.value;
+            selectedState = stateId;
+            await loadDistricts(stateId);
+            saveDraft();
+        });
+
+        districtSelect.addEventListener('change', async function() {
+            const districtId = this.value;
+            selectedDistrict = districtId;
+            await loadBlocks(districtId);
+            saveDraft();
+        });
+
+        blockSelect.addEventListener('change', async function() {
+            const blockId = this.value;
+            selectedBlock = blockId;
+            await loadSubCenters(blockId);
+            saveDraft();
+        });
+
+        subCenterSelect.addEventListener('change', async function() {
+            const subCenterId = this.value;
+            selectedSubCenter = subCenterId;
+            await loadVillages(subCenterId);
+            saveDraft();
+        });
+
+        villageSelect.addEventListener('change', saveDraft);
+
+        document.getElementById('householdForm').addEventListener('submit', async function(e) {
+            e.preventDefault();
+            
+            const householdName = householdNameInput.value.trim();
+            const stateId = stateSelect.value;
+            const districtId = districtSelect.value;
+            const blockId = blockSelect.value;
+            const subCenterId = subCenterSelect.value;
+            const villageId = villageSelect.value;
+
+            if (!householdName || !stateId || !districtId || !villageId || !subCenterId) {
+                showMessage('Please fill in all required fields', 'error');
+                return;
+            }
+
+            // Disable submit button and show loading
+            submitBtn.disabled = true;
+            submitBtn.innerHTML = '<span class="loading"></span>Creating household...';
+
+            try {
+                const response = await fetch('/api/household', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        household_name: householdName,
+                        state_id: stateId,
+                        district_id: districtId,
+                        block_id: blockId,
+                        sub_center_id: subCenterId,
+                        village_id: villageId
+                    })
+                });
+
+                const result = await response.json();
+
+                if (response.ok && result.success) {
+                    const msg = result.resumed
+                        ? 'Household resumed! Redirecting to survey...'
+                        : 'Household created successfully! Redirecting to survey...';
+                    showMessage(msg, 'success');
+                    clearDraft();
+                    try { localStorage.removeItem('survey_draft_v1'); } catch (e) {}
+                    setTimeout(() => {
+                        window.location.href = '/survey';
+                    }, 1500);
+                } else {
+                    showMessage(result.error || 'Failed to create household', 'error');
+                    submitBtn.disabled = false;
+                    submitBtn.innerHTML = 'Create Household & Start Survey';
+                }
+            } catch (error) {
+                showMessage('Error: ' + error.message, 'error');
+                submitBtn.disabled = false;
+                submitBtn.innerHTML = 'Create Household & Start Survey';
+            }
+        });
+
+        function showMessage(msg, type) {
+            const messageEl = document.getElementById('message');
+            messageEl.textContent = msg;
+            messageEl.className = `message ${type} show`;
+            setTimeout(() => {
+                messageEl.classList.remove('show');
+            }, 5000);
+        }
+
+        window.addEventListener('beforeunload', saveDraft);
+    </script>
+</body>
+</html>

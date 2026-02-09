@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Survey System - Home</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}?v=1">
+</head>
+<body>
+    <nav class="navbar">
+        <div class="nav-left">
+            <a href="{{ url_for('admin_login') }}" class="nav-link">Admin Login</a>
+            <a href="{{ url_for('user_login') }}" class="nav-link">User Login</a>
+        </div>
+        <div class="nav-right">
+            <a href="{{ url_for('home') }}" class="nav-link active">Home</a>
+            <a href="{{ url_for('logout') }}" class="nav-link">Logout</a>
+        </div>
+    </nav>
+
+    <div class="container">
+        <div class="hero">
+            <h1>Welcome to Survey System</h1>
+            <p>A comprehensive household survey management system</p>
+            <div class="hero-buttons">
+                <a href="{{ url_for('user_login') }}" class="btn btn-primary">Start Survey</a>
+                <a href="{{ url_for('admin_login') }}" class="btn btn-secondary">Admin Panel</a>
+            </div>
+        </div>
+
+        <div class="features">
+            <div class="feature-card">
+                <h3>User Portal</h3>
+                <p>Enter household data with location-based selection</p>
+            </div>
+            <div class="feature-card">
+                <h3>Admin Dashboard</h3>
+                <p>Manage locations, data, and system administrators</p>
+            </div>
+            <div class="feature-card">
+                <h3>Questionnaire</h3>
+                <p>Complete detailed household surveys</p>
+            </div>
+        </div>
+    </div>
+</body>
+</html>

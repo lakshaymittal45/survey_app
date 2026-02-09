@@ -1,0 +1,349 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Survey Architect Pro</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        body { font-family: 'Plus Jakarta Sans', sans-serif; }
+        
+        /* Tree Visualization Lines */
+        .tree-line::before {
+            content: "";
+            position: absolute;
+            left: -15px;
+            top: 0;
+            bottom: 20px;
+            border-left: 2px solid #e2e8f0;
+        }
+        .tree-node::after {
+            content: "";
+            position: absolute;
+            left: -15px;
+            top: 15px;
+            width: 10px;
+            border-top: 2px solid #e2e8f0;
+        }
+
+        /* Option Pills */
+        .option-pill {
+            font-size: 10px;
+            font-weight: 600;
+            padding: 2px 8px;
+            border-radius: 9999px;
+            border: 1px solid #e2e8f0;
+            background-color: #f8fafc;
+            color: #64748b;
+            transition: all 0.2s ease;
+        }
+        .option-pill:hover {
+            background-color: #eff6ff;
+            border-color: #bfdbfe;
+            color: #2563eb;
+        }
+
+        @media (max-width: 768px) {
+            header .max-w-[1400px] {
+                flex-direction: column;
+                align-items: flex-start;
+                gap: 12px;
+            }
+            .max-w-\[1400px\] {
+                padding-left: 16px;
+                padding-right: 16px;
+            }
+        }
+    </style>
+</head>
+<body class="bg-[#f8fafc] min-h-screen">
+
+    <header class="bg-white/80 backdrop-blur-md sticky top-0 z-40 border-b border-slate-200">
+        <div class="max-w-[1400px] mx-auto px-6 py-4 flex justify-between items-center">
+            <div class="flex items-center gap-3">
+                <div class="w-10 h-10 bg-blue-600 rounded-xl flex items-center justify-center shadow-lg shadow-blue-200">
+                    <svg class="w-6 h-6 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"></path></svg>
+                </div>
+                <div>
+                    <h1 class="text-lg font-bold text-slate-900 leading-tight">Survey Architect</h1>
+                    <p class="text-xs text-slate-500 font-medium">Control Center</p>
+                </div>
+            </div>
+            <div id="statusIndicator" class="flex items-center gap-2 text-xs font-semibold text-emerald-600 bg-emerald-50 px-3 py-1.5 rounded-full">
+                <span class="w-2 h-2 bg-emerald-500 rounded-full animate-pulse"></span>
+                Connected to API
+            </div>
+            <div class="flex items-center gap-3">
+                <a href="/logout" class="px-4 py-2 bg-slate-900 text-white text-xs font-bold rounded-lg shadow-sm hover:bg-slate-800">Logout</a>
+            </div>
+        </div>
+    </header>
+
+    <main class="max-w-[1400px] mx-auto p-6 lg:p-10">
+        <div class="grid grid-cols-1 lg:grid-cols-12 gap-8">
+            
+            <div class="lg:col-span-5 space-y-6">
+                <div class="bg-white rounded-2xl shadow-sm border border-slate-200 p-6 sticky top-28">
+                    <h2 class="text-sm font-bold text-slate-400 uppercase tracking-wider mb-6">Question Configuration</h2>
+                    
+                    <form id="questionForm" class="space-y-5">
+                        <div class="space-y-1.5">
+                            <label class="text-sm font-semibold text-slate-700">Target Section</label>
+                            <select id="section_id" class="w-full bg-slate-50 border border-slate-200 rounded-xl p-3 focus:ring-2 focus:ring-blue-500 outline-none transition-all" onchange="loadParents()" required>
+                                <option value="">Select Section...</option>
+                            </select>
+                        </div>
+
+                        <div class="space-y-1.5">
+                            <label class="text-sm font-semibold text-slate-700">Logical Parent</label>
+                            <select id="parent_id" class="w-full bg-slate-50 border border-slate-200 rounded-xl p-3 focus:ring-2 focus:ring-blue-500 outline-none transition-all" onchange="updateTriggerUI()">
+                                <option value="0">None (Root Question)</option>
+                            </select>
+                        </div>
+
+                        <div id="trigger_container" class="hidden animate-in fade-in slide-in-from-top-2">
+                            <div class="p-4 bg-indigo-50/50 rounded-xl border border-indigo-100 space-y-3">
+                                <label class="text-xs font-bold text-indigo-700 uppercase tracking-tight">Show this question if selection is:</label>
+                                <div id="trigger_input_wrapper"></div>
+                            </div>
+                        </div>
+
+                        <div class="pt-4 border-t border-slate-100 space-y-5">
+                            <div class="space-y-1.5">
+                                <label class="text-sm font-semibold text-slate-700">Question Content</label>
+                                <textarea id="question_text" rows="3" class="w-full bg-white border border-slate-200 rounded-xl p-3 focus:ring-2 focus:ring-blue-500 outline-none transition-all placeholder:text-slate-300" placeholder="Enter the text for this question..." required></textarea>
+                            </div>
+
+                            <div class="grid grid-cols-2 gap-4">
+                                <div class="space-y-1.5">
+                                    <label class="text-sm font-semibold text-slate-700">Input Type</label>
+                                    <select id="question_type" class="w-full bg-white border border-slate-200 rounded-xl p-3 focus:ring-2 focus:ring-blue-500 outline-none transition-all">
+                                        <option value="text">Text</option>
+                                        <option value="number">Number</option>
+                                        <option value="mcq">Choice (Single)</option>
+                                        <option value="checkbox">Choice (Multi)</option>
+                                    </select>
+                                </div>
+                                <div class="space-y-1.5">
+                                    <label class="text-sm font-semibold text-slate-700">Options</label>
+                                    <input type="text" id="options" class="w-full bg-white border border-slate-200 rounded-xl p-3 focus:ring-2 focus:ring-blue-500 outline-none transition-all placeholder:text-slate-300" placeholder="Option A, Option B">
+                                </div>
+                            </div>
+                        </div>
+
+                        <button type="submit" class="w-full bg-slate-900 hover:bg-blue-600 text-white font-bold py-4 rounded-xl shadow-lg shadow-slate-200 transition-all active:scale-[0.98] mt-4">
+                            Save & Add Question
+                        </button>
+                    </form>
+                </div>
+            </div>
+
+            <div class="lg:col-span-7">
+                <div class="bg-white rounded-2xl shadow-sm border border-slate-200 min-h-[700px] flex flex-col">
+                    <div class="p-6 border-b border-slate-100 flex justify-between items-center bg-slate-50/30 rounded-t-2xl">
+                        <div>
+                            <h2 class="text-sm font-bold text-slate-900">Live Structure Preview</h2>
+                            <p class="text-xs text-slate-500">Real-time hierarchy with branching logic & options</p>
+                        </div>
+                        <button onclick="loadParents()" class="p-2 hover:bg-white rounded-lg border border-transparent hover:border-slate-200 transition-all text-slate-400 hover:text-blue-600">
+                            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path></svg>
+                        </button>
+                    </div>
+                    
+                    <div id="treeContainer" class="p-8 flex-grow overflow-y-auto">
+                        <div class="flex flex-col items-center justify-center h-64 text-slate-400 space-y-3">
+                            <svg class="w-12 h-12 opacity-20" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10"></path></svg>
+                            <p class="text-sm font-medium">Select a section to view the hierarchy</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <div id="successAlert" class="hidden fixed bottom-8 left-1/2 -translate-x-1/2 bg-slate-900 text-white px-6 py-3 rounded-2xl shadow-2xl z-50 flex items-center gap-3 animate-in fade-in slide-in-from-bottom-4">
+        <div class="w-5 h-5 bg-emerald-500 rounded-full flex items-center justify-center">
+            <svg class="w-3 h-3 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 13l4 4L19 7"></path></svg>
+        </div>
+        <span class="text-sm font-semibold text-slate-100">Question synchronized with database</span>
+    </div>
+
+    <script>
+        const API_BASE = "/api";
+        let questionMap = {};
+
+        async function loadSections() {
+            try {
+                const res = await fetch(`${API_BASE}/sections`);
+                const data = await res.json();
+                const select = document.getElementById('section_id');
+                data.forEach(s => {
+                    select.innerHTML += `<option value="${s.section_id}">${s.title}</option>`;
+                });
+            } catch (e) {
+                const status = document.getElementById('statusIndicator');
+                status.classList.replace('text-emerald-600', 'text-red-600');
+                status.classList.replace('bg-emerald-50', 'bg-red-50');
+                status.innerHTML = "Offline - Check API";
+            }
+        }
+
+        async function loadParents() {
+            const sid = document.getElementById('section_id').value;
+            if (!sid) return;
+
+            const res = await fetch(`${API_BASE}/questions/tree/${sid}`);
+            const tree = await res.json();
+            
+            // 1. Update Parent Dropdown
+            const parentSelect = document.getElementById('parent_id');
+            parentSelect.innerHTML = '<option value="0">None (Root Question)</option>';
+            questionMap = {};
+
+            function populateDropdown(nodes, depth = 0) {
+                nodes.forEach(node => {
+                    let opts = typeof node.options === 'string' ? JSON.parse(node.options) : node.options;
+                    questionMap[node.question_id] = opts || [];
+                    
+                    const qOption = document.createElement('option');
+                    qOption.value = node.question_id;
+                    qOption.textContent = "— ".repeat(depth) + node.question_text.substring(0, 50) + "...";
+                    parentSelect.appendChild(qOption);
+                    if (node.children) populateDropdown(node.children, depth + 1);
+                });
+            }
+            populateDropdown(tree);
+
+            // 2. Refresh the Tree Viewer
+            renderTree(tree);
+            updateTriggerUI();
+        }
+
+        function renderTree(nodes) {
+            const container = document.getElementById('treeContainer');
+            if (nodes.length === 0) {
+                container.innerHTML = `<div class="text-center text-slate-400 text-sm italic py-20">No questions found in this section. Start by adding a root question.</div>`;
+                return;
+            }
+
+            function generateHtml(nodesList) {
+                let html = '<ul class="space-y-6">';
+                nodesList.forEach(node => {
+                    // Safe parse options for display
+                    let opts = node.options;
+                    if (typeof opts === 'string') {
+                        try { opts = JSON.parse(opts); } catch(e) { opts = []; }
+                    }
+
+                    html += `
+                        <li class="relative ml-16 tree-line">
+                            <div class="tree-node bg-white border border-slate-200 rounded-xl p-4 shadow-sm hover:border-blue-300 transition-all group">
+                                <div class="flex items-center justify-between mb-2">
+                                    <div class="flex items-center gap-2">
+                                        <span class="text-[10px] font-bold bg-slate-900 text-white px-2 py-0.5 rounded uppercase tracking-tighter">${node.question_type}</span>
+                                        ${node.trigger_value ? `<span class="text-[10px] font-bold bg-indigo-50 text-indigo-600 px-2 py-0.5 rounded border border-indigo-100 italic">IF: ${node.trigger_value}</span>` : ''}
+                                    </div>
+                                    <span class="text-[9px] text-slate-300 font-mono">ID:${node.question_id}</span>
+                                </div>
+                                <p class="text-sm font-semibold text-slate-800 leading-snug mb-3">${node.question_text}</p>
+                                
+                                ${opts && opts.length > 0 ? `
+                                    <div class="mt-3 pt-3 border-t border-slate-100">
+                                        <p class="text-[9px] font-extrabold text-slate-400 uppercase tracking-widest mb-2">Triggers Available:</p>
+                                        <div class="flex flex-wrap gap-1.5">
+                                            ${opts.map(opt => `<span class="option-pill">${opt}</span>`).join('')}
+                                        </div>
+                                    </div>
+                                ` : ''}
+                            </div>
+                            ${node.children ? generateHtml(node.children) : ''}
+                        </li>
+                    `;
+                });
+                html += '</ul>';
+                return html;
+            }
+
+            container.innerHTML = generateHtml(nodes);
+        }
+
+        function updateTriggerUI() {
+            const parentId = document.getElementById('parent_id').value;
+            const container = document.getElementById('trigger_container');
+            const wrapper = document.getElementById('trigger_input_wrapper');
+            
+            if (parentId === "0") {
+                container.classList.add('hidden');
+                wrapper.innerHTML = `<input type="hidden" id="trigger_value" value="">`;
+                return;
+            }
+
+            container.classList.remove('hidden');
+            const options = questionMap[parentId] || [];
+
+            if (options.length > 0) {
+                let selectHtml = `<select id="trigger_value" class="w-full bg-white border border-indigo-200 rounded-xl p-3 focus:ring-2 focus:ring-blue-500 outline-none shadow-sm font-medium text-indigo-900">`;
+                options.forEach(opt => selectHtml += `<option value="${opt}">${opt}</option>`);
+                selectHtml += `</select>`;
+                wrapper.innerHTML = selectHtml;
+            } else {
+                wrapper.innerHTML = `<input type="text" id="trigger_value" class="w-full bg-white border border-indigo-200 rounded-xl p-3 focus:ring-2 focus:ring-blue-500 outline-none shadow-sm" placeholder="Trigger value (e.g. 18)">`;
+            }
+        }
+
+        document.getElementById('questionForm').onsubmit = async (e) => {
+            e.preventDefault();
+            const btn = e.target.querySelector('button');
+            btn.disabled = true;
+            btn.innerText = "Synchronizing...";
+
+            const qt = document.getElementById('question_type').value;
+
+            const payload = {
+                section_id: parseInt(document.getElementById('section_id').value),
+                question_text: document.getElementById('question_text').value,
+                question_type: qt,            // UI type
+                answer_type: qt,              // ✅ backend expects this (maps it)
+                options: document.getElementById('options').value
+                    ? document.getElementById('options').value.split(',').map(s => s.trim()).filter(Boolean)
+                    : null,
+                parent_id: parseInt(document.getElementById('parent_id').value) || null,
+                trigger_value: document.getElementById('trigger_value').value || null
+            };
+
+            try {
+                const response = await fetch(`${API_BASE}/admin/question`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    credentials: 'include', // ✅ important for session cookie
+                    body: JSON.stringify(payload)
+                });
+
+                const out = await response.json();
+
+                if (!response.ok) {
+                    alert(out.error || "Failed to add question");
+                    return;
+                }
+
+                const alertBox = document.getElementById('successAlert');
+                alertBox.classList.remove('hidden');
+                setTimeout(() => alertBox.classList.add('hidden'), 2000);
+
+                await loadParents();
+                document.getElementById('question_text').value = '';
+                document.getElementById('options').value = '';
+            } catch (err) {
+                alert("Submission failed. Check server and network.");
+                console.error(err);
+            } finally {
+                btn.disabled = false;
+                btn.innerText = "Save & Add Question";
+            }
+        };
+
+        loadSections();
+    </script>
+</body>
+</html>

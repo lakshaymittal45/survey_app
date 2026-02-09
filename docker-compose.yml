@@ -1,0 +1,51 @@
+version: '3.8'
+
+services:
+  # --- Service 1: MySQL Database ---
+  db:
+    image: mysql:8.0
+    container_name: survey-db
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASSWORD}
+      MYSQL_DATABASE: ${DB_NAME}
+      MYSQL_USER: ${DB_USER}
+      MYSQL_PASSWORD: ${DB_PASSWORD}
+    ports:
+      # Maps your computer's port (from .env) to the container's internal port
+      - "${DB_LOCAL_PORT}:3306"
+    volumes:
+      # 1. Persist data so it survives restarts
+      - mysql_data:/var/lib/mysql
+      
+      # OPTIONAL: If you put your SQL file in a folder named 'init-db' next to this file,
+      # Docker will automatically import it on the very first run!
+      # - ./init-db:/docker-entrypoint-initdb.d
+    networks:
+      - app-network
+
+  # --- Service 2: phpMyAdmin Interface ---
+  phpmyadmin:
+    image: phpmyadmin/phpmyadmin
+    container_name: survey-admin
+    restart: unless-stopped
+    environment:
+      PMA_HOST: db
+      PMA_PORT: 3306
+      # Increases upload limit so large SQL imports don't fail
+      UPLOAD_LIMIT: 64M
+    ports:
+      - "${PMA_LOCAL_PORT}:80"
+    depends_on:
+      - db
+    networks:
+      - app-network
+
+# Define the network so containers can talk to each other
+networks:
+  app-network:
+    driver: bridge
+
+# Define the volume for persistent storage
+volumes:
+  mysql_data:

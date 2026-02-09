@@ -1,0 +1,1475 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Unified Survey Portal</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    body { font-family: 'Plus Jakarta Sans', sans-serif; background-color: #f8fafc; color: #1e293b; }
+    .hidden { display: none; }
+    .glass-panel { background: #ffffff; border: 1px solid #e2e8f0; }
+    .glass-card { background: rgba(255, 255, 255, 0.9); backdrop-filter: blur(10px); border: 1px solid rgba(226, 232, 240, 0.8); }
+    .child-indent { margin-left: 2.5rem; border-left: 2px solid #e2e8f0; padding-left: 1.5rem; position: relative; }
+    .section-active { border-left: 4px solid #3b82f6; background-color: #eff6ff; color: #1d4ed8; }
+    .step-transition { transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1); }
+    .q-error { border-color: #fca5a5 !important; box-shadow: 0 0 0 3px rgba(248, 113, 113, 0.2); }
+    .q-error-text { color: #ef4444; font-size: 0.85rem; margin-top: 8px; }
+    @media (max-width: 1024px) {
+      .child-indent { margin-left: 1.25rem; padding-left: 1rem; }
+    }
+    @media (max-width: 768px) {
+      header .max-w-[1400px] { flex-direction: column; align-items: flex-start; gap: 12px; }
+      .max-w-[1400px] { padding-left: 16px; padding-right: 16px; }
+      .mt-12.flex.items-center.justify-between { flex-direction: column; align-items: stretch; gap: 12px; }
+      .mt-12 .flex.gap-4 { flex-direction: column; width: 100%; }
+      .mt-12 button { width: 100%; }
+      table { display: block; overflow-x: auto; white-space: nowrap; }
+    }
+    @media (max-width: 480px) {
+      body { padding: 10px; }
+      .text-3xl { font-size: 1.6rem; }
+      .text-lg { font-size: 1rem; }
+    }
+  </style>
+</head>
+
+<body class="min-h-screen flex flex-col items-center justify-center p-4">
+
+<div id="main-frame" class="w-full max-w-5xl">
+  <div class="w-full flex justify-end mb-4">
+    <button type="button" onclick="handleLogout()" class="px-4 py-2 bg-slate-900 text-white text-xs font-bold rounded-lg shadow-sm hover:bg-slate-800">
+      Logout
+    </button>
+  </div>
+
+  <!-- SURVEY PAGE -->
+  <div id="survey-layer" class="hidden">
+    <header class="bg-white border-b border-slate-200 sticky top-0 z-50">
+      <div class="max-w-[1400px] mx-auto px-6 py-4 flex justify-between items-center">
+        <h1 class="text-lg font-bold">Health Data</h1>
+        <div class="flex flex-col items-end">
+          <span id="progressText" class="text-xs font-bold text-slate-400 uppercase">Progress</span>
+          <div class="w-32 h-1.5 bg-slate-100 rounded-full mt-1 overflow-hidden">
+            <div id="progressBar" class="h-full bg-blue-600 transition-all duration-500" style="width:0%"></div>
+          </div>
+        </div>
+      </div>
+    </header>
+
+    <div class="max-w-[1400px] mx-auto w-full flex-grow flex gap-8 p-6 lg:p-10">
+      <aside class="w-80 hidden lg:block space-y-2">
+        <h3 class="text-[11px] font-bold text-slate-400 uppercase tracking-[0.2em] mb-4 ml-4">Survey Roadmap</h3>
+        <nav id="sidebarNav" class="space-y-1"></nav>
+      </aside>
+
+      <main class="flex-grow max-w-4xl">
+        <div id="sectionTitleContainer" class="mb-8">
+          <h2 id="currentSectionTitle" class="text-3xl font-extrabold text-slate-900 tracking-tight">Loading...</h2>
+          <p class="text-slate-500 mt-2">Please answer all required questions in this segment.</p>
+        </div>
+
+        <div id="sectionErrorBanner" class="hidden mb-6 p-4 rounded-xl border border-red-200 bg-red-50 text-red-700 font-medium">
+          Please answer all required questions in this section before continuing.
+        </div>
+
+        <div id="questionContainer" class="space-y-6 step-transition"></div>
+
+        <div class="mt-12 flex items-center justify-between p-6 bg-white rounded-2xl border border-slate-200 shadow-sm">
+          <button id="prevBtn" onclick="moveSection(-1)"
+                  class="px-8 py-3 text-sm font-bold text-slate-600 hover:bg-slate-50 rounded-xl transition-all disabled:opacity-30">
+            Previous Section
+          </button>
+
+          <div class="flex gap-4">
+            <button id="saveExitBtn" onclick="saveAndExit()"
+                    class="px-8 py-3 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold rounded-xl transition-all">
+              Save & Exit
+            </button>
+            <button id="nextBtn" onclick="saveAndNext()"
+                    class="px-10 py-3 bg-blue-600 hover:bg-blue-700 text-white font-bold rounded-xl shadow-lg shadow-blue-100 transition-all transform active:scale-95">
+              Save & Next Section
+            </button>
+            <button id="submitBtn" onclick="submitSurvey()"
+                    class="hidden px-10 py-3 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-xl shadow-lg shadow-emerald-100 transition-all transform active:scale-95">
+              Complete Survey
+            </button>
+          </div>
+        </div>
+      </main>
+    </div>
+
+    <!-- (Optional) JSON overlay - kept unique id -->
+    <div id="jsonOverlay" class="hidden fixed inset-0 bg-slate-900/90 backdrop-blur-md z-[100] p-6 flex items-center justify-center">
+      <div class="bg-white rounded-3xl w-full max-w-4xl max-h-[90vh] flex flex-col shadow-2xl">
+        <div class="p-8 border-b flex justify-between items-center">
+          <div>
+            <h2 class="text-2xl font-bold text-slate-900">Survey Submission Successful</h2>
+            <p class="text-slate-500">The following JSON structure has been generated.</p>
+          </div>
+          <button onclick="location.reload()" class="bg-slate-100 p-3 rounded-full hover:bg-slate-200 transition-all">✕</button>
+        </div>
+        <div class="p-8 overflow-y-auto bg-slate-50/50">
+          <pre id="jsonDisplay" class="text-sm font-mono text-indigo-600 leading-relaxed"></pre>
+        </div>
+        <div class="p-6 bg-slate-50 border-t text-center">
+          <button onclick="location.reload()" class="px-12 py-4 bg-blue-600 text-white font-bold rounded-2xl shadow-xl shadow-blue-200">Submit New Response</button>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+
+  <!-- MEMBER COUNT STEP -->
+  <div id="member-count-layer" class="hidden glass-panel p-8 rounded-3xl shadow-xl">
+    <h2 class="text-2xl font-bold mb-6 border-b pb-4">Family Members</h2>
+    <div class="space-y-6">
+      <div>
+        <label class="text-xs font-bold text-slate-400 uppercase">Number of Members</label>
+        <input type="number" id="memberCount" min="1" max="50" placeholder="Enter number of members" class="w-full p-4 border rounded-xl text-lg outline-none">
+      </div>
+      <button type="button" onclick="startMemberEntry()" class="w-full bg-blue-600 text-white font-bold py-4 rounded-xl">Start Member Details</button>
+    </div>
+  </div>
+
+  <!-- PERSONAL DETAILS -->
+  <div id="personal-layer" class="hidden glass-panel p-8 rounded-3xl shadow-xl">
+    <h2 class="text-2xl font-bold mb-2">Final Step: Personal Details</h2>
+    <p id="memberProgress" class="text-slate-500 mb-6">Member 1 of 1</p>
+
+    <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+      <div>
+        <label class="text-xs font-bold text-slate-400 uppercase">First Name</label>
+        <input type="text" id="p_first" placeholder="Enter First Name" class="w-full p-3 border rounded-xl mt-1">
+      </div>
+      <div>
+        <label class="text-xs font-bold text-slate-400 uppercase">Middle Name</label>
+        <input type="text" id="p_middle" placeholder="Enter Middle Name" class="w-full p-3 border rounded-xl mt-1">
+      </div>
+      <div>
+        <label class="text-xs font-bold text-slate-400 uppercase">Surname</label>
+        <input type="text" id="p_surname" placeholder="Enter Surname" class="w-full p-3 border rounded-xl mt-1">
+      </div>
+
+      <div>
+        <label class="text-xs font-bold text-slate-400 uppercase">Gender</label>
+        <select id="p_gender" class="w-full p-3 border rounded-xl mt-1 bg-white">
+          <option value="" disabled selected>Select Gender</option>
+          <option value="Male">Male</option>
+          <option value="Female">Female</option>
+          <option value="Other">Other</option>
+        </select>
+      </div>
+
+      <div>
+        <label class="text-xs font-bold text-slate-400 uppercase">Relation to Head</label>
+        <input type="text" id="p_relation" placeholder="e.g. Self, Spouse" class="w-full p-3 border rounded-xl mt-1">
+      </div>
+
+      <div>
+        <label class="text-xs font-bold text-slate-400 uppercase">Earning Status</label>
+        <select id="p_earning" class="w-full p-3 border rounded-xl mt-1 bg-white">
+          <option value="" disabled selected>Select Status</option>
+          <option value="Non-earning">Non-earning</option>
+          <option value="Earning">Earning</option>
+        </select>
+      </div>
+
+      <div>
+        <label class="text-xs font-bold text-slate-400 uppercase">Monthly Income (Rs)</label>
+        <input type="number" id="p_income" placeholder="0.00" class="w-full p-3 border rounded-xl mt-1">
+      </div>
+      <div>
+        <label class="text-xs font-bold text-slate-400 uppercase">Age</label>
+        <input type="number" id="p_age" min="0" max="120" placeholder="Age" class="w-full p-3 border rounded-xl mt-1">
+      </div>
+
+      <div>
+        <label class="text-xs font-bold text-slate-400 uppercase">Aadhaar ID</label>
+        <input type="text" id="p_aadhar" maxlength="12" placeholder="12-digit Aadhaar" class="w-full p-3 border rounded-xl mt-1">
+      </div>
+
+      <div class="col-span-2">
+        <label class="text-xs font-bold text-slate-400 uppercase">Chronic Illness</label>
+        <input type="text" id="p_illness" placeholder="Describe any illness" class="w-full p-3 border rounded-xl mt-1">
+      </div>
+
+      <div class="col-span-3">
+        <label class="text-xs font-bold text-slate-400 uppercase">Remarks</label>
+        <textarea id="p_remark" placeholder="Any additional notes..." class="w-full p-3 border rounded-xl mt-1"></textarea>
+      </div>
+    </div>
+
+    <button type="button" onclick="saveMember()" class="w-full bg-emerald-600 text-white font-bold py-4 rounded-xl mt-6 shadow-lg hover:bg-emerald-700 transition-all">
+      Save Member
+    </button>
+  </div>
+
+  <!-- POST MEMBERS DECISION -->
+  <div id="post-members-layer" class="hidden glass-panel p-8 rounded-3xl shadow-xl">
+    <h2 class="text-2xl font-bold mb-6 border-b pb-4">Members Saved</h2>
+    <p class="text-slate-600 mb-6">All family members have been saved. What would you like to do next?</p>
+    <div class="flex gap-4">
+      <button type="button" onclick="showMemberTable()" class="px-8 py-3 bg-blue-600 hover:bg-blue-700 text-white font-bold rounded-xl">Continue to Individual Questionnaire</button>
+      <button type="button" onclick="saveAndQuitMembers()" class="px-8 py-3 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold rounded-xl">Save & Quit</button>
+    </div>
+  </div>
+
+  <!-- MEMBER TABLE -->
+  <div id="member-table-layer" class="hidden glass-panel p-8 rounded-3xl shadow-xl">
+    <h2 class="text-2xl font-bold mb-6 border-b pb-4">Family Members</h2>
+    <div class="overflow-x-auto">
+      <table class="min-w-full text-sm">
+        <thead>
+          <tr class="text-left text-slate-500 border-b">
+            <th class="py-3 pr-4">Name</th>
+            <th class="py-3 pr-4">Age</th>
+            <th class="py-3 pr-4">Gender</th>
+            <th class="py-3 pr-4">Relation</th>
+            <th class="py-3 pr-4">Earning</th>
+            <th class="py-3 pr-4">Aadhaar</th>
+            <th class="py-3 pr-4">Action</th>
+          </tr>
+        </thead>
+        <tbody id="memberTableBody"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- INDIVIDUAL QUESTIONNAIRE -->
+  <div id="individual-questionnaire-layer" class="hidden">
+    <header class="bg-white border-b border-slate-200 sticky top-0 z-50">
+      <div class="max-w-[1400px] mx-auto px-6 py-4 flex justify-between items-center">
+        <div>
+          <h1 class="text-lg font-bold">Individual Questionnaire</h1>
+          <p id="iq_member_label" class="text-xs text-slate-500 mt-1">Member</p>
+        </div>
+          <div class="flex items-center gap-4">
+            <button onclick="backToMembers()" class="px-4 py-2 text-xs font-bold text-slate-600 hover:bg-slate-50 rounded-xl transition-all">
+              Back to Members
+            </button>
+          <div class="flex flex-col items-end">
+            <span id="iq_progressText" class="text-xs font-bold text-slate-400 uppercase">Progress</span>
+            <div class="w-32 h-1.5 bg-slate-100 rounded-full mt-1 overflow-hidden">
+              <div id="iq_progressBar" class="h-full bg-blue-600 transition-all duration-500" style="width:0%"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </header>
+
+    <div class="max-w-[1400px] mx-auto w-full flex-grow flex gap-8 p-6 lg:p-10">
+      <aside class="w-80 hidden lg:block space-y-2">
+        <h3 class="text-[11px] font-bold text-slate-400 uppercase tracking-[0.2em] mb-4 ml-4">Individual Roadmap</h3>
+        <nav id="iq_sidebarNav" class="space-y-1"></nav>
+      </aside>
+
+      <main class="flex-grow max-w-4xl">
+        <div id="iq_sectionTitleContainer" class="mb-8">
+          <h2 id="iq_currentSectionTitle" class="text-3xl font-extrabold text-slate-900 tracking-tight">Loading...</h2>
+          <p class="text-slate-500 mt-2">Please answer all required questions for this member.</p>
+        </div>
+
+        <div id="iq_sectionErrorBanner" class="hidden mb-6 p-4 rounded-xl border border-red-200 bg-red-50 text-red-700 font-medium">
+          Please answer all required questions in this section before continuing.
+        </div>
+
+        <div id="iq_questionContainer" class="space-y-6 step-transition"></div>
+
+        <div class="mt-12 flex items-center justify-between p-6 bg-white rounded-2xl border border-slate-200 shadow-sm">
+          <button id="iq_prevBtn" onclick="moveIndividualSection(-1)"
+                  class="px-8 py-3 text-sm font-bold text-slate-600 hover:bg-slate-50 rounded-xl transition-all disabled:opacity-30">
+            Previous Section
+          </button>
+
+          <div class="flex gap-4">
+            <button id="iq_nextBtn" onclick="saveAndNextIndividual()"
+                    class="px-10 py-3 bg-blue-600 hover:bg-blue-700 text-white font-bold rounded-xl shadow-lg shadow-blue-100 transition-all transform active:scale-95">
+              Save & Next Section
+            </button>
+            <button id="iq_submitBtn" onclick="submitIndividualQuestionnaire()"
+                    class="hidden px-10 py-3 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-xl shadow-lg shadow-emerald-100 transition-all transform active:scale-95">
+              Submit Individual Questionnaire
+            </button>
+          </div>
+        </div>
+      </main>
+    </div>
+  </div>
+
+
+  <!-- COMPLETED OVERLAY (unique id) -->
+  <div id="completedOverlay" class="hidden fixed inset-0 bg-slate-900/90 backdrop-blur-md z-[100] p-6 flex items-center justify-center">
+    <div class="bg-white rounded-3xl w-full max-w-lg p-10 text-center shadow-2xl">
+      <div class="w-20 h-20 bg-emerald-100 text-emerald-600 rounded-full flex items-center justify-center mx-auto mb-6">
+        <svg xmlns="http://www.w3.org/2000/svg" class="h-10 w-10" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 13l4 4L19 7" />
+        </svg>
+      </div>
+      <h2 class="text-3xl font-bold text-slate-900 mb-2">Survey Completed!</h2>
+      <p class="text-slate-500 mb-8">All details for this respondent have been successfully recorded in the database.</p>
+
+      <button onclick="location.reload()" class="w-full py-4 bg-blue-600 text-white font-bold rounded-2xl shadow-xl hover:bg-blue-700 transition-all">
+        Start Next Survey Session
+      </button>
+    </div>
+  </div>
+
+</div>
+
+<script>
+// Use same-origin so session cookie is sent even when host is localhost vs 127.0.0.1
+const API_BASE = "/api";
+const SURVEY_DRAFT_KEY = 'survey_draft_v1';
+
+let sections = [];
+let currentIndex = 0;
+let currentSectionId = null;
+let responses = {};
+let attemptId = null;
+let currentPersonId = null;
+let members = [];
+let totalMembers = 0;
+let currentMemberIndex = 0;
+let memberSeq = 0;
+let mainQuestionnaireId = null;
+
+let iqSections = [];
+let iqCurrentIndex = 0;
+let iqCurrentSectionId = null;
+let iqResponses = {};
+let activeMemberId = null;
+let currentHouseholdId = null;
+let draftSaveTimer = null;
+
+function persistSurveyDraft(stage = null) {
+  try {
+    const personalDraft = {
+      first_name: document.getElementById('p_first')?.value || '',
+      middle_name: document.getElementById('p_middle')?.value || '',
+      surname: document.getElementById('p_surname')?.value || '',
+      gender: document.getElementById('p_gender')?.value || '',
+      relation_to_head: document.getElementById('p_relation')?.value || '',
+      earning_status: document.getElementById('p_earning')?.value || '',
+      income_in_rs: document.getElementById('p_income')?.value || '',
+      age: document.getElementById('p_age')?.value || '',
+      aadhar: document.getElementById('p_aadhar')?.value || '',
+      chronic_illness: document.getElementById('p_illness')?.value || '',
+      remark: document.getElementById('p_remark')?.value || ''
+    };
+    const payload = {
+      household_id: currentHouseholdId,
+      stage: stage || getCurrentStage(),
+      responses,
+      currentIndex,
+      currentSectionId,
+      members,
+      totalMembers,
+      currentMemberIndex,
+      memberSeq,
+      mainQuestionnaireId,
+      iqCurrentIndex,
+      iqCurrentSectionId,
+      iqResponses,
+      activeMemberId,
+      personalDraft
+    };
+    localStorage.setItem(SURVEY_DRAFT_KEY, JSON.stringify(payload));
+    persistServerDraft(payload);
+  } catch (e) {
+    // ignore storage errors
+  }
+}
+
+function loadSurveyDraft() {
+  try {
+    const raw = localStorage.getItem(SURVEY_DRAFT_KEY);
+    if (!raw) return null;
+    return JSON.parse(raw);
+  } catch (e) {
+    return null;
+  }
+}
+
+function getCurrentStage() {
+  const stages = [
+    'survey-layer',
+    'member-count-layer',
+    'personal-layer',
+    'post-members-layer',
+    'member-table-layer',
+    'individual-questionnaire-layer'
+  ];
+  for (const id of stages) {
+    const el = document.getElementById(id);
+    if (el && !el.classList.contains('hidden')) return id;
+  }
+  return 'survey-layer';
+}
+
+function restoreSurveyDraft() {
+  const draft = loadSurveyDraft();
+  if (!draft) return;
+
+  if (currentHouseholdId && draft.household_id && String(draft.household_id) !== String(currentHouseholdId)) {
+    try { localStorage.removeItem(SURVEY_DRAFT_KEY); } catch (e) {}
+    return;
+  }
+
+  responses = draft.responses || {};
+  currentIndex = draft.currentIndex || 0;
+  currentSectionId = draft.currentSectionId || null;
+  members = Array.isArray(draft.members) ? draft.members : [];
+  totalMembers = draft.totalMembers || 0;
+  currentMemberIndex = draft.currentMemberIndex || 0;
+  memberSeq = draft.memberSeq || members.length;
+  mainQuestionnaireId = draft.mainQuestionnaireId || null;
+  iqCurrentIndex = draft.iqCurrentIndex || 0;
+  iqCurrentSectionId = draft.iqCurrentSectionId || null;
+  iqResponses = draft.iqResponses || {};
+  activeMemberId = draft.activeMemberId || null;
+  if (draft.personalDraft) {
+    prefillPersonForm(draft.personalDraft);
+  }
+}
+
+function applySurveyState(state) {
+  if (!state || typeof state !== 'object') return;
+  if (Array.isArray(state.members)) members = state.members;
+  if (typeof state.totalMembers === 'number') totalMembers = state.totalMembers;
+  if (typeof state.currentMemberIndex === 'number') currentMemberIndex = state.currentMemberIndex;
+  if (typeof state.memberSeq === 'number') memberSeq = state.memberSeq;
+  if (state.activeMemberId !== undefined) activeMemberId = state.activeMemberId;
+  if (state.iqResponses) iqResponses = state.iqResponses;
+  if (typeof state.iqCurrentIndex === 'number') iqCurrentIndex = state.iqCurrentIndex;
+  if (state.iqCurrentSectionId !== undefined) iqCurrentSectionId = state.iqCurrentSectionId;
+  if (typeof state.currentIndex === 'number') currentIndex = state.currentIndex;
+  if (state.currentSectionId !== undefined) currentSectionId = state.currentSectionId;
+  if (state.personalDraft) prefillPersonForm(state.personalDraft);
+}
+
+async function loadServerDraft() {
+  try {
+    const res = await fetch(`${API_BASE}/household-draft`);
+    if (!res.ok) return null;
+    const data = await res.json();
+    if (!data || !data.success) return null;
+    return data;
+  } catch (e) {
+    return null;
+  }
+}
+
+async function applyServerDraft() {
+  const data = await loadServerDraft();
+  if (!data) return;
+  if (data.status === 'submitted') {
+    alert('Survey is already completed for this household.');
+    window.location.href = '/user-dashboard';
+    return;
+  }
+  if (!mainQuestionnaireId && data.main_questionnaire_id) {
+    mainQuestionnaireId = data.main_questionnaire_id;
+  }
+  const serverResponses = data.responses || {};
+  const localDraft = loadSurveyDraft();
+  if (!localDraft) {
+    responses = serverResponses;
+    const surveyState = data.draft && data.draft.survey_state;
+    applySurveyState(surveyState);
+    return surveyState?.stage || null;
+  }
+  responses = { ...serverResponses, ...responses };
+  return null;
+}
+
+function showLayer(id) {
+  [
+    'survey-layer',
+    'member-count-layer',
+    'personal-layer',
+    'post-members-layer',
+    'member-table-layer',
+    'individual-questionnaire-layer'
+  ].forEach(layerId => {
+    const el = document.getElementById(layerId);
+    if (el) el.classList.add('hidden');
+  });
+  const target = document.getElementById(id);
+  if (target) target.classList.remove('hidden');
+}
+
+function handleLogout() {
+  persistSurveyDraft();
+  window.location.href = '/logout';
+}
+
+function persistServerDraft(payload) {
+  if (!payload) return;
+  if (draftSaveTimer) clearTimeout(draftSaveTimer);
+  const survey_state = {
+    stage: payload.stage,
+    members: payload.members,
+    totalMembers: payload.totalMembers,
+    currentMemberIndex: payload.currentMemberIndex,
+    memberSeq: payload.memberSeq,
+    activeMemberId: payload.activeMemberId,
+    iqResponses: payload.iqResponses,
+    iqCurrentIndex: payload.iqCurrentIndex,
+    iqCurrentSectionId: payload.iqCurrentSectionId,
+    currentIndex: payload.currentIndex,
+    currentSectionId: payload.currentSectionId,
+    personalDraft: payload.personalDraft
+  };
+  draftSaveTimer = setTimeout(() => {
+    fetch(`${API_BASE}/survey-draft`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ survey_state })
+    }).catch(() => {});
+  }, 500);
+}
+
+// Initialize page - go straight to questionnaire
+async function initPage() {
+  try {
+    const householdRes = await fetch(`${API_BASE}/current-household`);
+    const householdData = await householdRes.json();
+    if (!householdData.household_id) {
+      alert('Household not set. Please create/select a household first.');
+      window.location.href = '/user-dashboard';
+      return;
+    }
+    currentHouseholdId = householdData.household_id;
+
+    restoreSurveyDraft();
+    if (!mainQuestionnaireId && householdData.main_questionnaire_id) {
+      mainQuestionnaireId = householdData.main_questionnaire_id;
+    }
+    const serverStage = await applyServerDraft();
+
+    document.getElementById('survey-layer').classList.remove('hidden');
+    initSurvey();
+    const draft = loadSurveyDraft();
+    if (draft && draft.stage && draft.stage !== 'survey-layer') {
+      showLayer(draft.stage);
+      if (draft.stage === 'member-table-layer') {
+        showMemberTable();
+      }
+      if (draft.stage === 'individual-questionnaire-layer' && activeMemberId) {
+        const idx = members.findIndex(m => m.member_id === activeMemberId);
+        if (idx >= 0) {
+          await openIndividualQuestionnaire(idx);
+        }
+      }
+    } else if (serverStage && serverStage !== 'survey-layer') {
+      showLayer(serverStage);
+      if (serverStage === 'member-table-layer') {
+        showMemberTable();
+      }
+      if (serverStage === 'individual-questionnaire-layer' && activeMemberId) {
+        const idx = members.findIndex(m => m.member_id === activeMemberId);
+        if (idx >= 0) {
+          await openIndividualQuestionnaire(idx);
+        }
+      }
+    }
+  } catch (err) {
+    alert("Server not reachable. Make sure Flask is running.");
+    console.error(err);
+  }
+}
+
+// Call on page load
+document.addEventListener('DOMContentLoaded', initPage);
+window.addEventListener('beforeunload', () => persistSurveyDraft());
+
+
+function prefillPersonForm(pd) {
+  const fields = {
+    p_first: 'first_name',
+    p_middle: 'middle_name',
+    p_surname: 'surname',
+    p_gender: 'gender',
+    p_relation: 'relation_to_head',
+    p_earning: 'earning_status',
+    p_income: 'income_in_rs',
+    p_aadhar: 'aadhar',
+    p_illness: 'chronic_illness',
+    p_remark: 'remark'
+  };
+  for (let id in fields) {
+    const val = pd[fields[id]];
+    document.getElementById(id).value = (val === null || val === undefined) ? '' : val;
+  }
+}
+
+// ------------------------------
+// SURVEY (sections + questions)
+// ------------------------------
+async function initSurvey() {
+  try {
+    // Load questionnaire data (sections + questions added by admins)
+    const res = await fetch(`${API_BASE}/questionnaire-data`);
+    const data = await res.json();
+    
+    // Extract sections from the data
+    sections = data.map(item => ({
+      section_id: item.section_id,
+      title: item.section_title,
+      questions: item.questions || []
+    }));
+
+    if (!sections.length) {
+      alert("No questionnaire sections found. Please contact administrator.");
+      return;
+    }
+
+    renderSidebar();
+    const startIndex = typeof currentIndex === 'number' && currentIndex >= 0 && currentIndex < sections.length
+      ? currentIndex
+      : 0;
+    loadSection(startIndex);
+  } catch (err) {
+    console.error("Error loading questionnaire:", err);
+    alert("Failed to load questionnaire. Please refresh the page.");
+  }
+}
+
+function renderSidebar() {
+  const nav = document.getElementById('sidebarNav');
+  nav.innerHTML = sections.map((s, idx) => `
+    <div id="side-tab-${idx}" class="flex items-center gap-3 px-4 py-3 rounded-xl transition-all font-medium text-sm text-slate-400">
+      <span class="w-6 h-6 rounded-full border-2 border-current flex items-center justify-center text-[10px]">${idx + 1}</span>
+      ${s.title}
+    </div>
+  `).join('');
+}
+
+async function loadSection(index) {
+  currentIndex = index;
+  const currentSection = sections[index];
+  currentSectionId = currentSection.section_id;
+
+  document.getElementById('currentSectionTitle').innerText = currentSection.title;
+
+  document.querySelectorAll('[id^="side-tab-"]').forEach((el, i) => {
+    el.className = i === index
+      ? "flex items-center gap-3 px-4 py-3 rounded-xl transition-all font-bold text-sm section-active shadow-sm"
+      : "flex items-center gap-3 px-4 py-3 rounded-xl transition-all font-medium text-sm text-slate-400";
+  });
+
+  const progress = ((index + 1) / sections.length) * 100;
+  document.getElementById('progressBar').style.width = `${progress}%`;
+  document.getElementById('progressText').innerText = `Progress: ${Math.round(progress)}%`;
+
+  document.getElementById('prevBtn').disabled = index === 0;
+  document.getElementById('nextBtn').classList.toggle('hidden', index === sections.length - 1);
+  document.getElementById('submitBtn').classList.toggle('hidden', index !== sections.length - 1);
+
+  const container = document.getElementById('questionContainer');
+  container.innerHTML = "";
+  
+  // Use questions from the already-loaded section data
+  const questions = currentSection.questions || [];
+  if (questions.length === 0) {
+    container.innerHTML = '<p class="text-slate-400 text-center py-8">No questions in this section</p>';
+  } else {
+    questions.forEach(q => container.appendChild(renderQuestion(q)));
+  }
+}
+
+function renderQuestion(q, isChild = false) {
+  const wrap = document.createElement('div');
+  wrap.id = `qbox_${q.question_id}`;
+  wrap.className = `bg-white p-6 rounded-2xl border border-slate-200 transition-all duration-300 ${isChild ? 'child-indent mt-4 hidden' : ''}`;
+
+  if (isChild) wrap.dataset.trigger = q.trigger_value;
+
+  wrap.innerHTML = `<p class="font-bold text-slate-800 text-lg leading-tight mb-4">${q.question_text}</p>`;
+
+  let opts = [];
+  if (q.options) {
+    if (typeof q.options === 'string') {
+      try {
+        opts = JSON.parse(q.options);
+      } catch (e) {
+        opts = q.options.split(',').map(o => o.trim()).filter(Boolean);
+      }
+    } else if (Array.isArray(q.options)) {
+      opts = q.options;
+    }
+  }
+  const savedValue = responses[q.question_id];
+
+  const qType = q.question_type;
+  const isSingle = qType === 'single_choice' || qType === 'mcq';
+  const isMulti = qType === 'multiple_choice' || qType === 'checkbox';
+
+  if (isSingle || isMulti) {
+    const grid = document.createElement('div');
+    grid.className = "grid grid-cols-1 md:grid-cols-2 gap-3";
+
+    (opts || []).forEach(opt => {
+      const label = document.createElement('label');
+      label.className = "flex items-center gap-4 p-4 rounded-xl border border-slate-100 hover:border-blue-200 hover:bg-blue-50/30 cursor-pointer transition-all group";
+
+      const isChecked = isMulti
+        ? Array.isArray(savedValue) && savedValue.includes(opt)
+        : savedValue === opt;
+
+      label.innerHTML = `
+        <input
+          type="${isSingle ? 'radio' : 'checkbox'}"
+          name="ans_${q.question_id}"
+          value="${opt}"
+          ${isChecked ? 'checked' : ''}
+          onchange="saveAnswer(${q.question_id}, '${escapeJs(opt)}', '${isMulti ? 'multiple_choice' : 'single_choice'}')"
+          class="w-5 h-5 text-blue-600 rounded-full border-slate-300 focus:ring-blue-500">
+        <span class="text-slate-600 font-medium group-hover:text-blue-700">${opt}</span>
+      `;
+      grid.appendChild(label);
+    });
+
+    wrap.appendChild(grid);
+  } else {
+    const input = document.createElement('input');
+    input.className = "w-full p-4 bg-slate-50 border border-slate-200 rounded-xl outline-none focus:ring-2 focus:ring-blue-500 focus:bg-white transition-all";
+    input.type = q.answer_type === 'numerical' ? 'number' : 'text';
+    input.placeholder = "Enter your response here...";
+    if (savedValue !== undefined && savedValue !== null) input.value = savedValue;
+    input.oninput = (e) => saveAnswer(q.question_id, e.target.value, 'open_ended');
+    wrap.appendChild(input);
+  }
+
+  if (q.children && q.children.length) {
+    const childWrapper = document.createElement('div');
+    childWrapper.id = `child_wrap_${q.question_id}`;
+
+    q.children.forEach(c => {
+      const childNode = renderQuestion(c, true);
+
+      // show if parent answer matches trigger
+      if (responses[q.question_id] === c.trigger_value) {
+        childNode.classList.remove('hidden');
+      }
+
+      childWrapper.appendChild(childNode);
+    });
+
+    wrap.appendChild(childWrapper);
+  }
+
+  return wrap;
+}
+
+/** Escape single quotes/backslashes for inline JS strings */
+function escapeJs(s) {
+  return String(s).replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+}
+
+function escapeAttr(str) {
+  return String(str)
+    .replace(/&/g, "&amp;")
+    .replace(/"/g, "&quot;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
+/**
+ * Save answer.
+ * - MCQ: store string
+ * - checkbox: store array of strings
+ * - text/number: store value
+ */
+function saveAnswer(qid, val, qtype) {
+  if (qtype === 'multiple_choice' || qtype === 'checkbox') {
+    const existing = Array.isArray(responses[qid]) ? responses[qid] : [];
+    const idx = existing.indexOf(val);
+    if (idx >= 0) existing.splice(idx, 1);
+    else existing.push(val);
+    responses[qid] = existing;
+  } else {
+    responses[qid] = val;
+  }
+
+  // persist
+  fetch(`${API_BASE}/responses`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ section_id: currentSectionId, responses })
+  }).catch(() => { /* ignore */ });
+
+  // child trigger logic works only for single-value answers
+  if (qtype !== 'multiple_choice' && qtype !== 'checkbox') {
+    const childWrap = document.getElementById(`child_wrap_${qid}`);
+    if (childWrap) {
+      Array.from(childWrap.children).forEach(child => {
+        const trigger = child.dataset.trigger;
+        if (trigger === val) {
+          child.classList.remove('hidden');
+        } else {
+          child.classList.add('hidden');
+
+          // delete child answer by its qid
+          const childQid = child.id.replace('qbox_', '');
+          delete responses[childQid];
+        }
+      });
+    }
+  }
+}
+
+async function saveCurrentSection() {
+  await fetch(`${API_BASE}/responses`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ section_id: currentSectionId, responses })
+  });
+}
+
+function moveSection(direction) {
+  const nextIdx = currentIndex + direction;
+  if (nextIdx >= 0 && nextIdx < sections.length) {
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+    loadSection(nextIdx);
+  }
+}
+
+async function saveAndNext() {
+  if (!validateCurrentSection()) return;
+  await saveCurrentSection();
+  moveSection(1);
+}
+
+async function saveAndExit() {
+  if (!validateCurrentSection()) return;
+  await saveCurrentSection();
+  persistSurveyDraft('survey-layer');
+  window.location.href = '/logout';
+}
+
+async function submitSurvey() {
+  if (!validateCurrentSection()) return;
+  const householdRes = await fetch(`${API_BASE}/current-household`);
+  const householdData = await householdRes.json();
+  if (!householdData.household_id) {
+    alert('Household not set. Please create/select a household before submitting.');
+    window.location.href = '/user-dashboard';
+    return;
+  }
+  if (!mainQuestionnaireId && householdData.main_questionnaire_id) {
+    mainQuestionnaireId = householdData.main_questionnaire_id;
+  }
+  await fetch(`${API_BASE}/responses`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ section_id: currentSectionId, responses })
+  });
+
+  try {
+    const res = await fetch(`${API_BASE}/main-questionnaire/submit`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ responses, main_questionnaire_id: mainQuestionnaireId })
+    });
+    const result = await res.json();
+    if (!res.ok || !result.success) {
+      alert(result.error || 'Failed to submit main questionnaire.');
+      return;
+    }
+    mainQuestionnaireId = result.main_questionnaire_id;
+  } catch (err) {
+    console.error("Error submitting main questionnaire:", err);
+    alert("Failed to submit main questionnaire. Please try again.");
+    return;
+  }
+
+  document.getElementById('survey-layer').classList.add('hidden');
+  document.getElementById('member-count-layer').classList.remove('hidden');
+  persistSurveyDraft('member-count-layer');
+  window.scrollTo(0,0);
+}
+
+function validateCurrentSection() {
+  const currentSection = sections[currentIndex];
+  const questions = flattenQuestions(currentSection.questions || []);
+  let firstInvalid = null;
+  const banner = document.getElementById('sectionErrorBanner');
+  if (banner) banner.classList.add('hidden');
+
+  for (const q of questions) {
+    const el = document.getElementById(`qbox_${q.question_id}`);
+    if (el && el.classList.contains('hidden')) continue;
+    if (el) {
+      el.classList.remove('q-error');
+      const existing = el.querySelector('.q-error-text');
+      if (existing) existing.remove();
+    }
+
+    const qType = q.question_type;
+    const isSingle = qType === 'single_choice' || qType === 'mcq';
+    const isMulti = qType === 'multiple_choice' || qType === 'checkbox';
+    const value = responses[q.question_id];
+
+    if (isSingle) {
+      if (!value) {
+        if (el) {
+          el.classList.add('q-error');
+          el.insertAdjacentHTML('beforeend', '<div class="q-error-text">This question is required.</div>');
+          if (!firstInvalid) firstInvalid = el;
+        }
+        continue;
+      }
+    } else if (isMulti) {
+      if (!Array.isArray(value) || value.length === 0) {
+        if (el) {
+          el.classList.add('q-error');
+          el.insertAdjacentHTML('beforeend', '<div class="q-error-text">Select at least one option.</div>');
+          if (!firstInvalid) firstInvalid = el;
+        }
+        continue;
+      }
+    } else {
+      if (value === undefined || value === null || String(value).trim() === '') {
+        if (el) {
+          el.classList.add('q-error');
+          el.insertAdjacentHTML('beforeend', '<div class="q-error-text">This field is required.</div>');
+          if (!firstInvalid) firstInvalid = el;
+        }
+        continue;
+      }
+    }
+  }
+
+  if (firstInvalid) {
+    firstInvalid.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    if (banner) banner.classList.remove('hidden');
+    return false;
+  }
+
+  return true;
+}
+
+function flattenQuestions(nodes) {
+  const list = [];
+  const walk = (arr) => {
+    (arr || []).forEach(q => {
+      list.push(q);
+      if (q.children && q.children.length) walk(q.children);
+    });
+  };
+  walk(nodes);
+  return list;
+}
+
+
+// ------------------------------
+// MEMBER ENTRY FLOW
+// ------------------------------
+function startMemberEntry() {
+  const count = parseInt(document.getElementById('memberCount').value || '0', 10);
+  if (!count || count < 1) {
+    alert('Please enter a valid number of members.');
+    return;
+  }
+  totalMembers = count;
+  currentMemberIndex = 0;
+  members = [];
+  memberSeq = 0;
+  document.getElementById('member-count-layer').classList.add('hidden');
+  document.getElementById('personal-layer').classList.remove('hidden');
+  updateMemberProgress();
+  persistSurveyDraft('personal-layer');
+}
+
+function updateMemberProgress() {
+  const label = document.getElementById('memberProgress');
+  label.textContent = `Member ${currentMemberIndex + 1} of ${totalMembers}`;
+}
+
+function clearMemberForm() {
+  ['p_first','p_middle','p_surname','p_gender','p_relation','p_earning','p_income','p_age','p_aadhar','p_illness','p_remark'].forEach(id => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    if (el.tagName.toLowerCase() === 'select') el.selectedIndex = 0;
+    else el.value = '';
+  });
+}
+
+function saveMember() {
+  const firstName = document.getElementById('p_first').value.trim();
+  const gender = document.getElementById('p_gender').value;
+  const earning = document.getElementById('p_earning').value;
+  const ageValue = document.getElementById('p_age').value;
+  const age = ageValue === '' ? null : parseInt(ageValue, 10);
+  const aadhar = document.getElementById('p_aadhar').value.trim();
+
+  if (!firstName || !gender || !earning || age === null || !aadhar) {
+    alert('Please fill in the mandatory fields: First Name, Gender, Earning Status, Age, and Aadhaar ID.');
+    return;
+  }
+  if (!/^\d{12}$/.test(aadhar)) {
+    alert('Aadhaar ID must be exactly 12 digits.');
+    return;
+  }
+
+  const payload = {
+    member_id: ++memberSeq,
+    first_name: firstName,
+    middle_name: document.getElementById('p_middle').value.trim(),
+    surname: document.getElementById('p_surname').value.trim(),
+    aadhar,
+    gender,
+    relation_to_head: document.getElementById('p_relation').value.trim(),
+    earning_status: earning,
+    income_in_rs: parseFloat(document.getElementById('p_income').value) || 0,
+    chronic_illness: document.getElementById('p_illness').value.trim(),
+    remark: document.getElementById('p_remark').value.trim(),
+    age
+  };
+
+  members.push(payload);
+  persistSurveyDraft();
+  currentMemberIndex += 1;
+
+  if (currentMemberIndex >= totalMembers) {
+    document.getElementById('personal-layer').classList.add('hidden');
+    document.getElementById('post-members-layer').classList.remove('hidden');
+    persistSurveyDraft('post-members-layer');
+  } else {
+    clearMemberForm();
+    updateMemberProgress();
+    persistSurveyDraft('personal-layer');
+  }
+}
+
+function showMemberTable() {
+  document.getElementById('post-members-layer').classList.add('hidden');
+  document.getElementById('member-table-layer').classList.remove('hidden');
+
+  const body = document.getElementById('memberTableBody');
+  const sorted = [...members].sort((a, b) => (a.age || 0) - (b.age || 0));
+  body.innerHTML = sorted.map(m => {
+    const fullName = [m.first_name, m.middle_name, m.surname].filter(Boolean).join(' ');
+    const age = m.age ?? '';
+    const eligible = age >= 30 && age <= 65;
+    const completed = !!m.individual_completed;
+    const memberIndex = members.findIndex(x => x.member_id === m.member_id);
+    const aadhar = m.aadhar || '';
+    const actionBtn = eligible
+      ? (completed
+        ? '<span class="px-3 py-1 bg-emerald-50 text-emerald-700 rounded-lg text-xs font-bold">Completed</span>'
+        : `<button class="px-3 py-1 bg-blue-600 text-white rounded-lg text-xs font-bold" onclick="openIndividualQuestionnaire(${memberIndex})">Go to Individual Questionnaire</button>`)
+      : '';
+    return `
+      <tr class="border-b">
+        <td class="py-3 pr-4">${escapeAttr(fullName)}</td>
+        <td class="py-3 pr-4">${escapeAttr(age)}</td>
+        <td class="py-3 pr-4">${escapeAttr(m.gender)}</td>
+        <td class="py-3 pr-4">${escapeAttr(m.relation_to_head || '')}</td>
+        <td class="py-3 pr-4">${escapeAttr(m.earning_status || '')}</td>
+        <td class="py-3 pr-4">${escapeAttr(aadhar)}</td>
+        <td class="py-3 pr-4">${actionBtn}</td>
+      </tr>
+    `;
+  }).join('');
+  persistSurveyDraft('member-table-layer');
+
+  // If no eligible members require an individual questionnaire, mark survey complete.
+  if (!hasEligibleMembers()) {
+    finalizeSurveyIfComplete();
+  }
+}
+
+function saveAndQuitMembers() {
+  persistSurveyDraft();
+  window.location.href = '/logout';
+}
+
+// ------------------------------
+// INDIVIDUAL QUESTIONNAIRE FLOW
+// ------------------------------
+async function openIndividualQuestionnaire(memberIndex) {
+  if (!mainQuestionnaireId) {
+    alert('Please complete the main questionnaire first.');
+    return;
+  }
+
+  const member = members[memberIndex];
+  if (!member) return;
+
+  const prevActive = activeMemberId;
+  const prevIq = iqResponses;
+  const prevIqIndex = iqCurrentIndex;
+  const prevIqSection = iqCurrentSectionId;
+  activeMemberId = member.member_id;
+  if (member.individual_responses) {
+    iqResponses = member.individual_responses || {};
+  } else if (prevActive === member.member_id && prevIq && Object.keys(prevIq).length) {
+    iqResponses = prevIq;
+  } else {
+    iqResponses = {};
+  }
+  iqCurrentIndex = prevActive === member.member_id ? prevIqIndex : 0;
+  iqCurrentSectionId = prevActive === member.member_id ? prevIqSection : null;
+
+  const fullName = [member.first_name, member.middle_name, member.surname].filter(Boolean).join(' ');
+  document.getElementById('iq_member_label').textContent = `Member: ${fullName || 'Individual'}`;
+
+  document.getElementById('member-table-layer').classList.add('hidden');
+  document.getElementById('individual-questionnaire-layer').classList.remove('hidden');
+
+  await initIndividualQuestionnaire();
+  persistSurveyDraft('individual-questionnaire-layer');
+  window.scrollTo(0, 0);
+}
+
+function backToMembers() {
+  document.getElementById('individual-questionnaire-layer').classList.add('hidden');
+  document.getElementById('member-table-layer').classList.remove('hidden');
+  showMemberTable();
+}
+
+async function initIndividualQuestionnaire() {
+  try {
+    const res = await fetch(`${API_BASE}/individual-questionnaire-data`);
+    const data = await res.json();
+
+    iqSections = data.map(item => ({
+      section_id: item.section_id,
+      title: item.section_title,
+      questions: item.questions || []
+    }));
+
+    if (!iqSections.length) {
+      alert("No individual questionnaire sections found. Please contact administrator.");
+      return;
+    }
+
+    renderIndividualSidebar();
+    const startIndex = typeof iqCurrentIndex === 'number' && iqCurrentIndex >= 0 && iqCurrentIndex < iqSections.length
+      ? iqCurrentIndex
+      : 0;
+    loadIndividualSection(startIndex);
+  } catch (err) {
+    console.error("Error loading individual questionnaire:", err);
+    alert("Failed to load individual questionnaire. Please refresh the page.");
+  }
+}
+
+function renderIndividualSidebar() {
+  const nav = document.getElementById('iq_sidebarNav');
+  nav.innerHTML = iqSections.map((s, idx) => `
+    <div id="iq-side-tab-${idx}" class="flex items-center gap-3 px-4 py-3 rounded-xl transition-all font-medium text-sm text-slate-400">
+      <span class="w-6 h-6 rounded-full border-2 border-current flex items-center justify-center text-[10px]">${idx + 1}</span>
+      ${s.title}
+    </div>
+  `).join('');
+}
+
+function loadIndividualSection(index) {
+  iqCurrentIndex = index;
+  const currentSection = iqSections[index];
+  iqCurrentSectionId = currentSection.section_id;
+
+  document.getElementById('iq_currentSectionTitle').innerText = currentSection.title;
+
+  document.querySelectorAll('[id^="iq-side-tab-"]').forEach((el, i) => {
+    el.className = i === index
+      ? "flex items-center gap-3 px-4 py-3 rounded-xl transition-all font-bold text-sm section-active shadow-sm"
+      : "flex items-center gap-3 px-4 py-3 rounded-xl transition-all font-medium text-sm text-slate-400";
+  });
+
+  const progress = ((index + 1) / iqSections.length) * 100;
+  document.getElementById('iq_progressBar').style.width = `${progress}%`;
+  document.getElementById('iq_progressText').innerText = `Progress: ${Math.round(progress)}%`;
+
+  document.getElementById('iq_prevBtn').disabled = index === 0;
+  document.getElementById('iq_nextBtn').classList.toggle('hidden', index === iqSections.length - 1);
+  document.getElementById('iq_submitBtn').classList.toggle('hidden', index !== iqSections.length - 1);
+
+  const container = document.getElementById('iq_questionContainer');
+  container.innerHTML = "";
+
+  const questions = currentSection.questions || [];
+  if (questions.length === 0) {
+    container.innerHTML = '<p class="text-slate-400 text-center py-8">No questions in this section</p>';
+  } else {
+    questions.forEach(q => container.appendChild(renderIndividualQuestion(q)));
+  }
+}
+
+function renderIndividualQuestion(q, isChild = false) {
+  const wrap = document.createElement('div');
+  wrap.id = `iq_qbox_${q.question_id}`;
+  wrap.className = `bg-white p-6 rounded-2xl border border-slate-200 transition-all duration-300 ${isChild ? 'child-indent mt-4 hidden' : ''}`;
+
+  if (isChild) wrap.dataset.trigger = q.trigger_value;
+
+  wrap.innerHTML = `<p class="font-bold text-slate-800 text-lg leading-tight mb-4">${q.question_text}</p>`;
+
+  let opts = [];
+  if (q.options) {
+    if (typeof q.options === 'string') {
+      try {
+        opts = JSON.parse(q.options);
+      } catch (e) {
+        opts = q.options.split(',').map(o => o.trim()).filter(Boolean);
+      }
+    } else if (Array.isArray(q.options)) {
+      opts = q.options;
+    }
+  }
+  const savedValue = iqResponses[q.question_id];
+
+  const qType = q.question_type;
+  const isSingle = qType === 'single_choice' || qType === 'mcq';
+  const isMulti = qType === 'multiple_choice' || qType === 'checkbox';
+
+  if (isSingle || isMulti) {
+    const grid = document.createElement('div');
+    grid.className = "grid grid-cols-1 md:grid-cols-2 gap-3";
+
+    (opts || []).forEach(opt => {
+      const label = document.createElement('label');
+      label.className = "flex items-center gap-4 p-4 rounded-xl border border-slate-100 hover:border-blue-200 hover:bg-blue-50/30 cursor-pointer transition-all group";
+
+      const isChecked = isMulti
+        ? Array.isArray(savedValue) && savedValue.includes(opt)
+        : savedValue === opt;
+
+      label.innerHTML = `
+        <input
+          type="${isSingle ? 'radio' : 'checkbox'}"
+          name="iq_ans_${q.question_id}"
+          value="${opt}"
+          ${isChecked ? 'checked' : ''}
+          onchange="saveIndividualAnswer(${q.question_id}, '${escapeJs(opt)}', '${isMulti ? 'multiple_choice' : 'single_choice'}')"
+          class="w-5 h-5 text-blue-600 rounded-full border-slate-300 focus:ring-blue-500">
+        <span class="text-slate-600 font-medium group-hover:text-blue-700">${opt}</span>
+      `;
+      grid.appendChild(label);
+    });
+
+    wrap.appendChild(grid);
+  } else {
+    const input = document.createElement('input');
+    input.className = "w-full p-4 bg-slate-50 border border-slate-200 rounded-xl outline-none focus:ring-2 focus:ring-blue-500 focus:bg-white transition-all";
+    input.type = q.answer_type === 'numerical' ? 'number' : 'text';
+    input.placeholder = "Enter your response here...";
+    if (savedValue !== undefined && savedValue !== null) input.value = savedValue;
+    input.oninput = (e) => saveIndividualAnswer(q.question_id, e.target.value, 'open_ended');
+    wrap.appendChild(input);
+  }
+
+  if (q.children && q.children.length) {
+    const childWrapper = document.createElement('div');
+    childWrapper.id = `iq_child_wrap_${q.question_id}`;
+
+    q.children.forEach(c => {
+      const childNode = renderIndividualQuestion(c, true);
+
+      if (iqResponses[q.question_id] === c.trigger_value) {
+        childNode.classList.remove('hidden');
+      }
+
+      childWrapper.appendChild(childNode);
+    });
+
+    wrap.appendChild(childWrapper);
+  }
+
+  return wrap;
+}
+
+function saveIndividualAnswer(qid, val, qtype) {
+  if (qtype === 'multiple_choice' || qtype === 'checkbox') {
+    const existing = Array.isArray(iqResponses[qid]) ? iqResponses[qid] : [];
+    const idx = existing.indexOf(val);
+    if (idx >= 0) existing.splice(idx, 1);
+    else existing.push(val);
+    iqResponses[qid] = existing;
+  } else {
+    iqResponses[qid] = val;
+  }
+
+  if (qtype !== 'multiple_choice' && qtype !== 'checkbox') {
+    const childWrap = document.getElementById(`iq_child_wrap_${qid}`);
+    if (childWrap) {
+      Array.from(childWrap.children).forEach(child => {
+        const trigger = child.dataset.trigger;
+        if (trigger === val) {
+          child.classList.remove('hidden');
+        } else {
+          child.classList.add('hidden');
+          const childQid = child.id.replace('iq_qbox_', '');
+          delete iqResponses[childQid];
+        }
+      });
+    }
+  }
+
+  persistSurveyDraft();
+}
+
+function moveIndividualSection(direction) {
+  const nextIdx = iqCurrentIndex + direction;
+  if (nextIdx >= 0 && nextIdx < iqSections.length) {
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+    loadIndividualSection(nextIdx);
+  }
+}
+
+async function saveAndNextIndividual() {
+  if (!validateIndividualSection()) return;
+  moveIndividualSection(1);
+}
+
+function validateIndividualSection() {
+  const currentSection = iqSections[iqCurrentIndex];
+  const questions = flattenQuestions(currentSection.questions || []);
+  let firstInvalid = null;
+  const banner = document.getElementById('iq_sectionErrorBanner');
+  if (banner) banner.classList.add('hidden');
+
+  for (const q of questions) {
+    const el = document.getElementById(`iq_qbox_${q.question_id}`);
+    if (el && el.classList.contains('hidden')) continue;
+    if (el) {
+      el.classList.remove('q-error');
+      const existing = el.querySelector('.q-error-text');
+      if (existing) existing.remove();
+    }
+
+    const qType = q.question_type;
+    const isSingle = qType === 'single_choice' || qType === 'mcq';
+    const isMulti = qType === 'multiple_choice' || qType === 'checkbox';
+    const value = iqResponses[q.question_id];
+
+    if (isSingle) {
+      if (!value) {
+        if (el) {
+          el.classList.add('q-error');
+          el.insertAdjacentHTML('beforeend', '<div class="q-error-text">This question is required.</div>');
+          if (!firstInvalid) firstInvalid = el;
+        }
+        continue;
+      }
+    } else if (isMulti) {
+      if (!Array.isArray(value) || value.length === 0) {
+        if (el) {
+          el.classList.add('q-error');
+          el.insertAdjacentHTML('beforeend', '<div class="q-error-text">Select at least one option.</div>');
+          if (!firstInvalid) firstInvalid = el;
+        }
+        continue;
+      }
+    } else {
+      if (value === undefined || value === null || String(value).trim() === '') {
+        if (el) {
+          el.classList.add('q-error');
+          el.insertAdjacentHTML('beforeend', '<div class="q-error-text">This field is required.</div>');
+          if (!firstInvalid) firstInvalid = el;
+        }
+        continue;
+    }
+  }
+
+  const member = members.find(m => m.member_id === activeMemberId);
+  if (member) {
+    member.individual_responses = { ...iqResponses };
+  }
+  persistSurveyDraft('individual-questionnaire-layer');
+}
+
+  if (firstInvalid) {
+    firstInvalid.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    if (banner) banner.classList.remove('hidden');
+    return false;
+  }
+
+  return true;
+}
+
+async function submitIndividualQuestionnaire() {
+  if (!validateIndividualSection()) return;
+
+  const member = members.find(m => m.member_id === activeMemberId);
+  if (!member) {
+    alert('Member not found.');
+    return;
+  }
+
+  try {
+    const res = await fetch(`${API_BASE}/individual-questionnaire/submit`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        main_questionnaire_id: mainQuestionnaireId,
+        member,
+        responses: iqResponses
+      })
+    });
+    const result = await res.json();
+    if (!res.ok || !result.success) {
+      alert(result.error || 'Failed to submit individual questionnaire.');
+      return;
+    }
+
+    member.individual_completed = true;
+    member.individual_questionnaire_id = result.individual_questionnaire_id;
+    member.individual_responses = { ...iqResponses };
+
+    alert('Individual questionnaire submitted successfully.');
+    await finalizeSurveyIfComplete();
+    backToMembers();
+  } catch (err) {
+    console.error('Error submitting individual questionnaire:', err);
+    alert('Failed to submit individual questionnaire. Please try again.');
+  }
+}
+
+function isEligibleMember(member) {
+  const age = member?.age ?? 0;
+  return age >= 30 && age <= 65;
+}
+
+function hasEligibleMembers() {
+  return members.some(m => isEligibleMember(m));
+}
+
+function allEligibleMembersCompleted() {
+  return members.every(m => !isEligibleMember(m) || m.individual_completed);
+}
+
+async function finalizeSurveyIfComplete() {
+  if (!allEligibleMembersCompleted()) return;
+  try {
+    const res = await fetch(`${API_BASE}/complete-household`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ main_questionnaire_id: mainQuestionnaireId })
+    });
+    const result = await res.json();
+    if (res.ok && result.success) {
+      alert('Survey completed successfully.');
+      try { localStorage.removeItem(SURVEY_DRAFT_KEY); } catch (e) {}
+    }
+  } catch (e) {
+    // ignore completion errors; user can retry later
+  }
+}
+
+// ------------------------------
+// FINAL SUBMIT (person update)
+// ------------------------------
+async function finalSubmit() {
+  // deprecated in new flow
+}
+</script>
+
+</body>
+</html>
