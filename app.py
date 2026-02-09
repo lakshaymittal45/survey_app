@@ -40,21 +40,24 @@ try:
 except Exception:
     load_dotenv = None
 
+load_dotenv()
 
 # ==========================================================
 # APP + DATABASE CONFIG
 # ==========================================================
 
-if load_dotenv:
-    load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
-
 app = Flask(__name__)
 app.secret_key = os.environ.get("FLASK_SECRET_KEY", secrets.token_hex(16))
 
-app.config["SQLALCHEMY_DATABASE_URI"] = os.environ.get(
-    "PRIMARY_DB_URI",
-    "mysql+pymysql://root:1234@127.0.0.1:3306/survey_1"
-)
+database_url = os.getenv("DATABASE_URL") or os.getenv("PRIMARY_DB_URI")
+
+if not database_url:
+    raise RuntimeError("DATABASE_URL is not set")
+
+if database_url.startswith("mysql://"):
+    database_url = database_url.replace("mysql://", "mysql+pymysql://", 1)
+
+app.config["SQLALCHEMY_DATABASE_URI"] = database_url
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
 db = SQLAlchemy(app)
 
@@ -717,7 +720,6 @@ def parse_bulk_rows(rows, level: str):
         "villagelgd": "lgd",
         "villagelgdcode": "lgd",
         "villagelgdcodeid": "lgd",
-        "villagelgdcode": "lgd",
         "villagelgd": "lgd",
         "village_lgd_code": "lgd",
     }
@@ -1665,7 +1667,6 @@ def complete_household_survey():
             """), {"hid": household_id}).mappings().fetchone()
             if row:
                 main_id = row["main_questionnaire_id"]
-
         if not main_id:
             return json_error("Main questionnaire not found.", 404)
 
@@ -2161,21 +2162,23 @@ def admin_filter_households():
                 d.name AS district_name,
                 b.name AS block_name,
                 sc.name AS sub_center_name,
-                v.village_lgd_code AS village_lgd_code
+                v.village_name,
+                v.village_lgd_code,
+                m.main_questionnaire_id,
+                m.responses
             FROM households h
-            LEFT JOIN (
+            INNER JOIN users u ON h.user_id = u.user_id
+            INNER JOIN states s ON h.state_id = s.state_id
+            INNER JOIN districts d ON h.district_id = d.district_id
+            INNER JOIN blocks b ON h.block_id = b.block_id
+            INNER JOIN sub_centers sc ON h.sub_center_id = sc.sub_center_id
+            INNER JOIN villages v ON h.village_id = v.village_id
+            INNER JOIN (
                 SELECT household_id, MAX(main_questionnaire_id) AS main_questionnaire_id
                 FROM main_questionnaire_responses
                 GROUP BY household_id
             ) mm ON mm.household_id = h.household_id
-            LEFT JOIN survey_contributors contrib ON contrib.main_questionnaire_id = mm.main_questionnaire_id
-            LEFT JOIN users u ON contrib.user_id = u.user_id
-            LEFT JOIN users u_owner ON h.user_id = u_owner.user_id
-            LEFT JOIN states s ON h.state_id = s.state_id
-            LEFT JOIN districts d ON h.district_id = d.district_id
-            LEFT JOIN blocks b ON h.block_id = b.block_id
-            LEFT JOIN sub_centers sc ON h.sub_center_id = sc.sub_center_id
-            LEFT JOIN villages v ON h.village_id = v.village_id
+            INNER JOIN main_questionnaire_responses m ON m.main_questionnaire_id = mm.main_questionnaire_id
         """
 
         filters = []
@@ -2308,7 +2311,6 @@ def admin_export_household_responses():
         if village_id:
             filters.append("h.village_id = :village_id")
             params["village_id"] = village_id
-
         if filters:
             base += " WHERE " + " AND ".join(filters)
         base += " ORDER BY h.household_id DESC"
@@ -3244,10 +3246,14 @@ def admin_create_village():
             columns.append("village_id")
             params["village_id"] = next_id("villages", "village_id")
 
-        columns += ["village_lgd_code", "name", "district_id", "block_id"]
-        params["village_lgd_code"] = params.pop("lgd")
+        if column_exists("villages", "village_lgd_code"):
+            columns.append("village_lgd_code")
+            params["village_lgd_code"] = lgd_code
+
+        columns += ["name", "district_id", "block_id"]
         if has_sub_center:
             columns.append("sub_center_id")
+
         cols_sql = ", ".join(columns)
         vals_sql = ", ".join(f":{c}" for c in columns)
         db.session.execute(sql_text(f"""
