@@ -4579,16 +4579,16 @@ def initialize_survey():
 # RUN
 # ==========================================================
 
-@app.route("/__init_db__", methods=["POST"])
-def init_db():
-    try:
-        with app.app_context():
-            ensure_questionnaire_tables()
-            ensure_household_name_unique_index()
-            ensure_aadhar_storage_columns()
-        return "✅ Database schema created successfully", 200
-    except Exception:
-        return traceback.format_exc(), 500
+# @app.route("/__init_db__", methods=["POST"])
+# def init_db():
+#     try:
+#         with app.app_context():
+#             ensure_questionnaire_tables()
+#             ensure_household_name_unique_index()
+#             ensure_aadhar_storage_columns()
+#         return "✅ Database schema created successfully", 200
+#     except Exception:
+#         return traceback.format_exc(), 500
 
 if __name__ == "__main__":
     app.run(debug=True)
