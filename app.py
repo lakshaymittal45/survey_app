@@ -49,18 +49,21 @@ load_dotenv()
 app = Flask(__name__)
 app.secret_key = os.environ.get("FLASK_SECRET_KEY", secrets.token_hex(16))
 
-# Create db FIRST (no app bound yet)
 db = SQLAlchemy()
 
-# Get database URL (runtime-safe)
-database_url = os.getenv("DATABASE_URL") or os.getenv("PRIMARY_DB_URI")
+# Build DB URL manually from Railway MySQL vars
+mysql_host = os.getenv("MYSQLHOST")
+mysql_user = os.getenv("MYSQLUSER")
+mysql_password = os.getenv("MYSQLPASSWORD")
+mysql_db = os.getenv("MYSQLDATABASE")
+mysql_port = os.getenv("MYSQLPORT", "3306")
 
-# Convert MySQL URL for PyMySQL
-if database_url and database_url.startswith("mysql://"):
-    database_url = database_url.replace("mysql://", "mysql+pymysql://", 1)
+if mysql_host and mysql_user and mysql_password and mysql_db:
+    database_url = (
+        f"mysql+pymysql://{mysql_user}:{mysql_password}"
+        f"@{mysql_host}:{mysql_port}/{mysql_db}"
+    )
 
-# Configure DB ONLY if URL exists
-if database_url:
     app.config["SQLALCHEMY_DATABASE_URI"] = database_url
     app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
     db.init_app(app)
