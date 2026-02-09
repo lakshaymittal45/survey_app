@@ -348,6 +348,29 @@ CREATE TABLE IF NOT EXISTS survey_attempts (
     ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
+CREATE TABLE survey_contributors (
+  contributor_id INT AUTO_INCREMENT PRIMARY KEY,
+
+  main_questionnaire_id BIGINT NOT NULL,
+  user_id INT NOT NULL,
+
+  contributed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+
+  INDEX idx_contrib_mq (main_questionnaire_id),
+  INDEX idx_contrib_user (user_id),
+  INDEX idx_contrib_time (contributed_at),
+
+  CONSTRAINT fk_contrib_mq
+    FOREIGN KEY (main_questionnaire_id)
+    REFERENCES main_questionnaire_responses(main_questionnaire_id)
+    ON DELETE CASCADE,
+
+  CONSTRAINT fk_contrib_user
+    FOREIGN KEY (user_id)
+    REFERENCES users(user_id)
+    ON DELETE CASCADE
+);
+
 -- ==========================================================
 -- TRIGGERS (UPPERCASE NORMALIZATION)
 -- ==========================================================
@@ -404,31 +427,3 @@ FOR EACH ROW SET NEW.name = UPPER(NEW.name) //
 
 DELIMITER ;
 
-ALTER TABLE users
-ADD COLUMN password VARCHAR(255) NOT NULL AFTER username;
-
-INSERT INTO admins (username, password, password_hash)
-SELECT
-  'admin',
-  'admin123',
-  '$pbkdf2-sha256$600000$examplehashhere'
-WHERE NOT EXISTS (
-  SELECT 1 FROM admins WHERE username = 'admin'
-);
-
-INSERT INTO users (username, password, password_hash)
-VALUES (
-  'user2',
-  'user123',
-  '$pbkdf2-sha256$600000$examplehash'
-);
-DELETE FROM admins
-WHERE username = 'admin';
-
-DELETE FROM users
-WHERE username = 'user2';
-
-ALTER TABLE users DROP COLUMN password;
-
-SELECT * FROM users;
-SELECT * FROM admins;
