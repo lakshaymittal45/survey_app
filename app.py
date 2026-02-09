@@ -49,18 +49,21 @@ load_dotenv()
 app = Flask(__name__)
 app.secret_key = os.environ.get("FLASK_SECRET_KEY", secrets.token_hex(16))
 
+# Create db FIRST (no app bound yet)
+db = SQLAlchemy()
+
+# Get database URL (runtime-safe)
 database_url = os.getenv("DATABASE_URL") or os.getenv("PRIMARY_DB_URI")
 
-if not database_url:
-    raise RuntimeError("DATABASE_URL is not set")
-
-if database_url.startswith("mysql://"):
+# Convert MySQL URL for PyMySQL
+if database_url and database_url.startswith("mysql://"):
     database_url = database_url.replace("mysql://", "mysql+pymysql://", 1)
 
-app.config["SQLALCHEMY_DATABASE_URI"] = database_url
-app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
-db = SQLAlchemy(app)
-
+# Configure DB ONLY if URL exists
+if database_url:
+    app.config["SQLALCHEMY_DATABASE_URI"] = database_url
+    app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
+    db.init_app(app)
 if CORS:
     CORS(app, resources={r"/*": {"origins": "*"}}, supports_credentials=True)
 
