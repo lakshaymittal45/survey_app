@@ -3747,7 +3747,6 @@ def admin_delete_village(village_lgd_code):
         db.session.rollback()
         return json_error(str(e), 500, traceback.format_exc())
 
-
 # ===================== BULK LOCATION UPLOAD =====================
 
 @app.route("/api/admin/locations/bulk/<level>", methods=["POST"])
@@ -3787,83 +3786,189 @@ def admin_bulk_locations(level):
     if not rows:
         return json_error("No data found in file", 400)
 
-    items, parse_errors = parse_bulk_rows(rows, level)
-    if not items and parse_errors:
-        return json_error("No valid rows found", 400, {"errors": parse_errors[:20]})
-
     inserted = 0
     skipped = 0
     errors = []
+    parse_errors = []
 
-    # ---- helper functions (state / district / block / subcenter unchanged) ----
-    # [UNCHANGED — your existing functions stay exactly the same]
+    # ---------- FIXED COLUMN MAPPING (NO HEADERS) ----------
+    items = []
+    for idx, row in enumerate(rows, start=1):
+        try:
+            if len(row) < 5:
+                raise ValueError("Row must have at least 5 columns")
 
-    # ---- village handling ----
+            item = {
+                "_row": idx,
+                "state": (row[0] or "").strip(),
+                "district": (row[1] or "").strip(),
+                "block": (row[2] or "").strip(),
+                "subcenter": (row[3] or "").strip(),
+                "village": (row[4] or "").strip(),
+                "lgd": safe_int(row[5]) if len(row) > 5 else None,
+            }
+
+            if not item["state"] or not item["district"] or not item["block"] or not item["village"]:
+                raise ValueError("State, District, Block, Village cannot be empty")
+
+            items.append(item)
+
+        except Exception as e:
+            parse_errors.append(f"Row {idx}: {str(e)}")
+
+    if not items:
+        return json_error("No valid rows found", 400, {"errors": parse_errors[:20]})
+
+    # ---------- HELPERS (UNCHANGED LOGIC STYLE) ----------
+
+    def get_state_id(name):
+        row = db.session.execute(
+            sql_text("SELECT state_id FROM states WHERE LOWER(name)=LOWER(:n) LIMIT 1"),
+            {"n": name},
+        ).fetchone()
+        if row:
+            return row[0], False
+
+        res = db.session.execute(
+            sql_text("INSERT INTO states (name) VALUES (:n)"),
+            {"n": name},
+        )
+        return res.lastrowid, True
+
+    def get_district_id(state_id, name):
+        row = db.session.execute(
+            sql_text("""
+                SELECT district_id FROM districts
+                WHERE LOWER(name)=LOWER(:n) AND state_id=:sid LIMIT 1
+            """),
+            {"n": name, "sid": state_id},
+        ).fetchone()
+        if row:
+            return row[0], False
+
+        res = db.session.execute(
+            sql_text("""
+                INSERT INTO districts (name, state_id)
+                VALUES (:n, :sid)
+            """),
+            {"n": name, "sid": state_id},
+        )
+        return res.lastrowid, True
+
+    def get_block_id(district_id, name):
+        row = db.session.execute(
+            sql_text("""
+                SELECT block_id FROM blocks
+                WHERE LOWER(name)=LOWER(:n) AND district_id=:did LIMIT 1
+            """),
+            {"n": name, "did": district_id},
+        ).fetchone()
+        if row:
+            return row[0], False
+
+        res = db.session.execute(
+            sql_text("""
+                INSERT INTO blocks (name, district_id)
+                VALUES (:n, :did)
+            """),
+            {"n": name, "did": district_id},
+        )
+        return res.lastrowid, True
+
+    def get_subcenter_id(block_id, name):
+        row = db.session.execute(
+            sql_text("""
+                SELECT sub_center_id FROM sub_centers
+                WHERE LOWER(name)=LOWER(:n) AND block_id=:bid LIMIT 1
+            """),
+            {"n": name, "bid": block_id},
+        ).fetchone()
+        if row:
+            return row[0], False
+
+        res = db.session.execute(
+            sql_text("""
+                INSERT INTO sub_centers (name, block_id)
+                VALUES (:n, :bid)
+            """),
+            {"n": name, "bid": block_id},
+        )
+        return res.lastrowid, True
 
     def get_village_id(name, district_id, block_id, sub_center_id, lgd_code):
         has_sub_center = column_exists("villages", "sub_center_id")
 
+        where = "LOWER(name)=LOWER(:n) AND district_id=:did AND block_id=:bid"
         params = {"n": name, "did": district_id, "bid": block_id}
-        where = "LOWER(name) = LOWER(:n) AND district_id = :did AND block_id = :bid"
 
         if has_sub_center:
-            where += " AND sub_center_id = :sid"
+            where += " AND sub_center_id=:sid"
             params["sid"] = sub_center_id
 
         row = db.session.execute(
             sql_text(f"SELECT village_id FROM villages WHERE {where} LIMIT 1"),
             params,
         ).fetchone()
-
         if row:
             return row[0], False
 
         if lgd_code and column_exists("villages", "village_lgd_code"):
-            lgd_row = db.session.execute(
-                sql_text("SELECT village_id FROM villages WHERE village_lgd_code = :lgd"),
+            row = db.session.execute(
+                sql_text("SELECT village_id FROM villages WHERE village_lgd_code=:lgd"),
                 {"lgd": lgd_code},
             ).fetchone()
-            if lgd_row:
-                return lgd_row[0], False
+            if row:
+                return row[0], False
 
-        if not lgd_code and column_exists("villages", "village_lgd_code"):
-            lgd_code = next_id("villages", "village_lgd_code")
-
-        columns = ["name", "district_id", "block_id"]
-        params = {
+        cols = ["name", "district_id", "block_id"]
+        vals = {
             "name": name,
             "district_id": district_id,
             "block_id": block_id,
-            "village_lgd_code": lgd_code,
         }
 
         if has_sub_center:
-            columns.append("sub_center_id")
-            params["sub_center_id"] = sub_center_id
+            cols.append("sub_center_id")
+            vals["sub_center_id"] = sub_center_id
 
         if column_exists("villages", "village_lgd_code"):
-            columns.append("village_lgd_code")
-
-        cols_sql = ", ".join(columns)
-        vals_sql = ", ".join(f":{c}" for c in columns)
+            cols.append("village_lgd_code")
+            vals["village_lgd_code"] = lgd_code
 
         res = db.session.execute(
-            sql_text(f"INSERT INTO villages ({cols_sql}) VALUES ({vals_sql})"),
-            params,
+            sql_text(f"""
+                INSERT INTO villages ({", ".join(cols)})
+                VALUES ({", ".join(":"+c for c in cols)})
+            """),
+            vals,
         )
-
         return res.lastrowid, True
 
-    # ---- processing loop ----
+    # ---------- MAIN PROCESSING LOOP ----------
 
     for item in items:
         try:
             with db.session.begin_nested():
-                # existing logic unchanged
-                lgd_code = extract_lgd_code(item)
-                # rest stays same
+                state_id, _ = get_state_id(item["state"])
+                district_id, _ = get_district_id(state_id, item["district"])
+                block_id, _ = get_block_id(district_id, item["block"])
+                sub_center_id, _ = get_subcenter_id(block_id, item["subcenter"])
+
+                village_id, created = get_village_id(
+                    item["village"],
+                    district_id,
+                    block_id,
+                    sub_center_id,
+                    item["lgd"],
+                )
+
+                if created:
+                    inserted += 1
+                else:
+                    skipped += 1
+
         except Exception as e:
-            errors.append(f"Row {item.get('_row')}: {str(e)}")
+            errors.append(f"Row {item['_row']}: {str(e)}")
 
     db.session.commit()
 
@@ -3874,6 +3979,133 @@ def admin_bulk_locations(level):
         "errors": errors[:20],
         "parse_errors": parse_errors[:20],
     })
+
+# # ===================== BULK LOCATION UPLOAD =====================
+
+# @app.route("/api/admin/locations/bulk/<level>", methods=["POST"])
+# @role_required("admin")
+# def admin_bulk_locations(level):
+#     if not load_workbook:
+#         return json_error("openpyxl is required for bulk upload.", 500)
+
+#     level_map = {
+#         "state": "states",
+#         "states": "states",
+#         "district": "districts",
+#         "districts": "districts",
+#         "block": "blocks",
+#         "blocks": "blocks",
+#         "subcenter": "subcenters",
+#         "subcentre": "subcenters",
+#         "subcenters": "subcenters",
+#         "subcentres": "subcenters",
+#         "village": "villages",
+#         "villages": "villages",
+#     }
+
+#     level = level_map.get((level or "").strip().lower())
+#     if not level:
+#         return json_error("Invalid level", 400)
+
+#     file = request.files.get("file")
+#     if not file:
+#         return json_error("file is required", 400)
+
+#     try:
+#         rows = read_excel_rows(file)
+#     except Exception as e:
+#         return json_error(f"Failed to read Excel: {str(e)}", 400)
+
+#     if not rows:
+#         return json_error("No data found in file", 400)
+
+#     items, parse_errors = parse_bulk_rows(rows, level)
+#     if not items and parse_errors:
+#         return json_error("No valid rows found", 400, {"errors": parse_errors[:20]})
+
+#     inserted = 0
+#     skipped = 0
+#     errors = []
+
+#     # ---- helper functions (state / district / block / subcenter unchanged) ----
+#     # [UNCHANGED — your existing functions stay exactly the same]
+
+#     # ---- village handling ----
+
+#     def get_village_id(name, district_id, block_id, sub_center_id, lgd_code):
+#         has_sub_center = column_exists("villages", "sub_center_id")
+
+#         params = {"n": name, "did": district_id, "bid": block_id}
+#         where = "LOWER(name) = LOWER(:n) AND district_id = :did AND block_id = :bid"
+
+#         if has_sub_center:
+#             where += " AND sub_center_id = :sid"
+#             params["sid"] = sub_center_id
+
+#         row = db.session.execute(
+#             sql_text(f"SELECT village_id FROM villages WHERE {where} LIMIT 1"),
+#             params,
+#         ).fetchone()
+
+#         if row:
+#             return row[0], False
+
+#         if lgd_code and column_exists("villages", "village_lgd_code"):
+#             lgd_row = db.session.execute(
+#                 sql_text("SELECT village_id FROM villages WHERE village_lgd_code = :lgd"),
+#                 {"lgd": lgd_code},
+#             ).fetchone()
+#             if lgd_row:
+#                 return lgd_row[0], False
+
+#         if not lgd_code and column_exists("villages", "village_lgd_code"):
+#             lgd_code = next_id("villages", "village_lgd_code")
+
+#         columns = ["name", "district_id", "block_id"]
+#         params = {
+#             "name": name,
+#             "district_id": district_id,
+#             "block_id": block_id,
+#             "village_lgd_code": lgd_code,
+#         }
+
+#         if has_sub_center:
+#             columns.append("sub_center_id")
+#             params["sub_center_id"] = sub_center_id
+
+#         if column_exists("villages", "village_lgd_code"):
+#             columns.append("village_lgd_code")
+
+#         cols_sql = ", ".join(columns)
+#         vals_sql = ", ".join(f":{c}" for c in columns)
+
+#         res = db.session.execute(
+#             sql_text(f"INSERT INTO villages ({cols_sql}) VALUES ({vals_sql})"),
+#             params,
+#         )
+
+#         return res.lastrowid, True
+
+#     # ---- processing loop ----
+
+#     for item in items:
+#         try:
+#             with db.session.begin_nested():
+#                 # existing logic unchanged
+#                 lgd_code = extract_lgd_code(item)
+#                 # rest stays same
+#         except Exception as e:
+#             errors.append(f"Row {item.get('_row')}: {str(e)}")
+
+#     db.session.commit()
+
+#     return jsonify({
+#         "success": True,
+#         "inserted": inserted,
+#         "skipped": skipped,
+#         "errors": errors[:20],
+#         "parse_errors": parse_errors[:20],
+#     })
 
 # @app.route("/api/admin/village", methods=["POST"])
 # @role_required("admin")
