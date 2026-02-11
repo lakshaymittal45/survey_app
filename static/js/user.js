@@ -129,9 +129,8 @@ function createQuestionElement(question, questionNumber) {
         const optionsContainer = document.createElement('div');
         optionsContainer.className = 'options-container';
 
-        // Find child questions (same section) that reference this question as parent
-        const currentSection = questionnaireData.sections[currentSectionIndex] || { questions: [] };
-        const childQuestions = (currentSection.questions || []).filter(q => q.parent_id === question.question_id);
+        // Use precomputed children if available
+        const childQuestions = question.children || [];
         const childContainer = document.createElement('div');
         childContainer.className = 'child-questions';
         childContainer.style.display = 'none';
