@@ -1783,11 +1783,24 @@ def get_questionnaire_data():
 
         result = []
         for section in sections:
-            question_rows = db.session.execute(
-                sql_text("SELECT * FROM questions WHERE question_section_id=:sid ORDER BY question_order"),
+            # Fetch both main and individual questions for this section and merge them
+            question_rows_main = db.session.execute(
+                sql_text("SELECT * FROM questions WHERE question_section_id=:sid"),
                 {"sid": section["section_id"]},
             ).mappings().all()
-            questions = build_question_tree([dict(q) for q in question_rows])
+
+            question_rows_individual = db.session.execute(
+                sql_text("SELECT * FROM individual_questions WHERE question_section_id=:sid"),
+                {"sid": section["section_id"]},
+            ).mappings().all()
+
+            # Merge both
+            all_questions = list(question_rows_main) + list(question_rows_individual)
+
+            # Sort after merging
+            all_questions = sorted(all_questions, key=lambda r: r.get("question_order") or 0)
+
+            questions = build_question_tree([dict(q) for q in all_questions])
 
             result.append({
                 "section_id": section["section_id"],
