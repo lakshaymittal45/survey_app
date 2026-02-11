@@ -165,9 +165,9 @@ function createQuestionElement(question, questionNumber) {
             input.value = String(option.option_id);
             input.id = `option_${option.option_id}`;
 
-            if (isMultiple && Array.isArray(existingAnswer) && existingAnswer.includes(option.option_text)) {
+            if (isMultiple && Array.isArray(existingAnswer) && (existingAnswer.includes(String(option.option_id)) || existingAnswer.includes(option.option_text))) {
                 input.checked = true;
-            } else if (!isMultiple && existingAnswer === option.option_text) {
+            } else if (!isMultiple && (String(existingAnswer) === String(option.option_id) || existingAnswer === option.option_text)) {
                 input.checked = true;
             }
 
@@ -265,7 +265,7 @@ function createQuestionElement(question, questionNumber) {
                 const optId = String(opt.option_id);
                 const optText = opt.option_text;
                 const wrapper = optionChildMap[optId];
-                        const isActive = activeValues.some(v => v !== null && v !== undefined && String(v) === String(opt.option_id));
+                        const isActive = activeValues.some(v => v !== null && v !== undefined && (String(v) === String(opt.option_id) || String(v) === String(opt.option_text)));
                 if (wrapper) {
                     if (isActive) {
                         wrapper.style.display = '';
