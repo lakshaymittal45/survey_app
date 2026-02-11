@@ -138,13 +138,7 @@ function createQuestionElement(question, questionNumber) {
 
         // (Removed per-option wrapper map; child questions rebuilt dynamically)
 
-        // Helper to clear responses for a question subtree
-        function clearSubtreeResponses(q) {
-            if (!q) return;
-            currentResponses[q.question_id] = null;
-            const children = (currentSection.questions || []).filter(x => x.parent_id === q.question_id);
-            children.forEach(c => clearSubtreeResponses(c));
-        }
+        // (Removed helper: subtree response clearing is handled during rebuild)
 
         question.options.forEach(option => {
             const optionDiv = document.createElement('div');
@@ -183,16 +177,18 @@ function createQuestionElement(question, questionNumber) {
                     currentResponses[question.question_id] = String(option.option_id);
                 }
 
-                // 🔥 REBUILD CHILD QUESTIONS CLEANLY
+                // 🔥 CLEAN REBUILD CHILDREN
                 if (childQuestions && childQuestions.length > 0) {
 
                     const activeValues = isMultiple
                         ? (currentResponses[question.question_id] || [])
                         : [currentResponses[question.question_id]];
 
+                    // Clear previous children completely
                     childContainer.innerHTML = '';
 
                     childQuestions.forEach((child, idx) => {
+
                         if (activeValues.includes(String(child.trigger_value))) {
 
                             const childEl = createQuestionElement(
@@ -201,6 +197,9 @@ function createQuestionElement(question, questionNumber) {
                             );
 
                             childContainer.appendChild(childEl);
+                        } else {
+                            // Also clear response if not active
+                            delete currentResponses[child.question_id];
                         }
                     });
 
