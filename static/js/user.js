@@ -30,7 +30,7 @@ async function loadQuestionnaireData() {
     try {
         showMessage('Loading questionnaire...', 'info');
         
-        const response = await fetch('/api/questionnaire/data');
+        const response = await fetch('/api/questionnaire/data', { credentials: 'include' });
         if (!response.ok) {
             throw new Error(`HTTP error! status: ${response.status}`);
         }
@@ -147,7 +147,7 @@ function createQuestionElement(question, questionNumber) {
             const input = document.createElement('input');
             input.type = isMultiple ? 'checkbox' : 'radio';
             input.name = `question_${question.question_id}` + (isMultiple ? `_${option.option_id}` : '');
-            input.value = String(option.option_id);
+            input.value = option.option_text;
             input.id = `option_${option.option_id}`;
 
             if (isMultiple && Array.isArray(existingAnswer) && (existingAnswer.includes(String(option.option_id)) || existingAnswer.includes(option.option_text))) {
@@ -163,7 +163,7 @@ function createQuestionElement(question, questionNumber) {
                         ? currentResponses[question.question_id].slice()
                         : [];
 
-                    const value = String(option.option_id);
+                    const value = option.option_text;
 
                     if (input.checked) {
                         if (!arr.includes(value)) arr.push(value);
@@ -174,22 +174,35 @@ function createQuestionElement(question, questionNumber) {
 
                     currentResponses[question.question_id] = arr;
                 } else {
-                    currentResponses[question.question_id] = String(option.option_id);
+                    currentResponses[question.question_id] = option.option_text;
                 }
 
                 // 🔥 CLEAN REBUILD CHILDREN
                 if (childQuestions && childQuestions.length > 0) {
 
-                    const activeValues = isMultiple
-                        ? (currentResponses[question.question_id] || [])
-                        : [currentResponses[question.question_id]];
+                    let activeValues;
+
+                    if (isMultiple) {
+                        activeValues = Array.isArray(currentResponses[question.question_id])
+                            ? currentResponses[question.question_id]
+                            : [];
+                    } else {
+                        activeValues = currentResponses[question.question_id]
+                            ? [currentResponses[question.question_id]]
+                            : [];
+                    }
 
                     // Clear previous children completely
                     childContainer.innerHTML = '';
 
+
                     childQuestions.forEach((child, idx) => {
 
-                        if (activeValues.includes(String(child.trigger_value))) {
+                        if (
+                            activeValues.some(
+                                v => String(v).trim() === String(child.trigger_value).trim()
+                            )
+                        ) {
 
                             const childEl = createQuestionElement(
                                 child,
@@ -228,8 +241,12 @@ function createQuestionElement(question, questionNumber) {
                 ? (Array.isArray(existingAnswer) ? existingAnswer : [])
                 : [existingAnswer];
 
-            childQuestions.forEach((child, idx) => {
-                if (activeValues.includes(String(child.trigger_value))) {
+                    childQuestions.forEach((child, idx) => {
+                        if (
+                            activeValues.some(
+                                v => String(v).trim() === String(child.trigger_value).trim()
+                            )
+                        ) {
                     const childEl = createQuestionElement(
                         child,
                         `${questionNumber}.${idx + 1}`
@@ -358,6 +375,7 @@ async function saveProgress() {
     try {
         const response = await fetch('/api/save_responses', {
             method: 'POST',
+            credentials: 'include',
             headers: {
                 'Content-Type': 'application/json'
             },
@@ -387,6 +405,7 @@ async function submitQuestionnaire() {
         
         const response = await fetch('/api/save_responses', {
             method: 'POST',
+            credentials: 'include',
             headers: {
                 'Content-Type': 'application/json'
             },
