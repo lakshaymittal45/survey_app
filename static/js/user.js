@@ -136,6 +136,17 @@ function createQuestionElement(question, questionNumber) {
         childContainer.className = 'child-questions';
         childContainer.style.display = 'none';
 
+        // Create a container per option to preserve option ordering for subquestions
+        const optionChildMap = {};
+        question.options.forEach(opt => {
+            const optWrap = document.createElement('div');
+            optWrap.className = 'option-children';
+            optWrap.dataset.optionId = String(opt.option_id);
+            optWrap.style.display = 'none';
+            optionChildMap[String(opt.option_id)] = optWrap;
+            childContainer.appendChild(optWrap);
+        });
+
         // Helper to clear responses for a question subtree
         function clearSubtreeResponses(q) {
             if (!q) return;
@@ -174,26 +185,31 @@ function createQuestionElement(question, questionNumber) {
                     currentResponses[question.question_id] = option.option_text;
                 }
 
-                // Show/hide child questions based on trigger_value
+                // Show/hide child questions grouped by parent option
                 if (childQuestions && childQuestions.length > 0) {
-                    // Determine which triggers are active
                     const activeValues = isMultiple ? (currentResponses[question.question_id] || []) : [currentResponses[question.question_id]];
 
-                    // For each child, check if any active value matches child's trigger_value (or option id)
                     let anyVisible = false;
-                    childContainer.querySelectorAll('.question-item').forEach(el => el.style.display = 'none');
-                    childQuestions.forEach(childQ => {
-                        const trigger = String(childQ.trigger_value || '').trim();
-                        const matches = activeValues.some(v => v !== null && v !== undefined && String(v) === trigger);
-                        const finalShow = trigger ? matches : false;
-                        const childEl = childContainer.querySelector(`[data-question-id='${childQ.question_id}']`);
-                        if (finalShow && childEl) {
-                            childEl.style.display = '';
-                            anyVisible = true;
-                        } else if (childEl) {
-                            // clear hidden child's responses
-                            clearSubtreeResponses(childQ);
-                            childEl.style.display = 'none';
+                    // For each option's child wrapper, show if that option is active
+                    question.options.forEach(opt => {
+                        const optId = String(opt.option_id);
+                        const optText = opt.option_text;
+                        const wrapper = optionChildMap[optId];
+                        const isActive = activeValues.some(v => v !== null && v !== undefined && (String(v) === optId || String(v) === optText));
+                        if (wrapper) {
+                            if (isActive) {
+                                wrapper.style.display = '';
+                                // show children inside
+                                wrapper.querySelectorAll('.question-item').forEach(el => el.style.display = '');
+                                anyVisible = true;
+                            } else {
+                                // hide and clear
+                                wrapper.querySelectorAll('.question-item').forEach(el => el.style.display = 'none');
+                                // clear responses for hidden subtree
+                                const childrenQs = (currentSection.questions || []).filter(x => String(x.parent_id) === String(question.question_id) && (String(x.trigger_value || '') === optId || String(x.trigger_value || '') === optText));
+                                childrenQs.forEach(cq => clearSubtreeResponses(cq));
+                                wrapper.style.display = 'none';
+                            }
                         }
                     });
 
@@ -212,27 +228,50 @@ function createQuestionElement(question, questionNumber) {
             optionsContainer.appendChild(optionDiv);
         });
 
-        // Render child question elements (hidden by default)
+        // Render child question elements (hidden by default) into their option wrapper
         childQuestions.forEach((cq, idx) => {
             const childEl = createQuestionElement(cq, `${questionNumber}.${idx+1}`);
             childEl.style.display = 'none';
-            childContainer.appendChild(childEl);
+            const trigger = String(cq.trigger_value || '').trim();
+            let placed = false;
+            question.options.forEach(opt => {
+                if (trigger === String(opt.option_id) || trigger === String(opt.option_text)) {
+                    const wrap = optionChildMap[String(opt.option_id)];
+                    if (wrap) {
+                        wrap.appendChild(childEl);
+                        placed = true;
+                    }
+                }
+            });
+            if (!placed) {
+                // fallback: append to container root
+                childContainer.appendChild(childEl);
+            }
         });
 
         // Initialize child visibility based on existing answers
         if (childQuestions.length > 0) {
             const activeValues = isMultiple ? (Array.isArray(existingAnswer) ? existingAnswer : []) : [existingAnswer];
             let anyVisible = false;
-            childQuestions.forEach(childQ => {
-                const trigger = String(childQ.trigger_value || '').trim();
-                const matches = activeValues.some(v => v !== null && v !== undefined && String(v) === trigger);
-                const childEl = childContainer.querySelector(`[data-question-id='${childQ.question_id}']`);
-                if (matches && childEl) {
-                    childEl.style.display = '';
-                    anyVisible = true;
-                } else if (childEl) {
-                    clearSubtreeResponses(childQ);
-                    childEl.style.display = 'none';
+            question.options.forEach(opt => {
+                const optId = String(opt.option_id);
+                const optText = opt.option_text;
+                const wrapper = optionChildMap[optId];
+                const isActive = activeValues.some(v => v !== null && v !== undefined && (String(v) === optId || String(v) === optText));
+                if (wrapper) {
+                    if (isActive) {
+                        wrapper.style.display = '';
+                        wrapper.querySelectorAll('.question-item').forEach(el => el.style.display = '');
+                        anyVisible = true;
+                    } else {
+                        wrapper.querySelectorAll('.question-item').forEach(el => {
+                            const qid = el.dataset.questionId;
+                            const qObj = (currentSection.questions || []).find(x => String(x.question_id) === String(qid));
+                            if (qObj) clearSubtreeResponses(qObj);
+                            el.style.display = 'none';
+                        });
+                        wrapper.style.display = 'none';
+                    }
                 }
             });
             childContainer.style.display = anyVisible ? '' : 'none';
