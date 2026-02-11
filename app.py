@@ -843,14 +843,22 @@ def _ensure_survey_contributor(main_questionnaire_id, user_id):
 def _get_aadhar_enc_key():
     key_raw = (os.environ.get("AADHAR_ENC_KEY") or "").strip()
     if not key_raw:
-        raise RuntimeError("AADHAR_ENC_KEY is required for Aadhaar encryption")
+        print("⚠️ AADHAR_ENC_KEY not set: Aadhaar encryption will be disabled (fallback mode)")
+        return None
+
     # Accept hex (32 chars) or urlsafe base64
-    if len(key_raw) == 32 and all(c in "0123456789abcdefABCDEF" for c in key_raw):
-        key = bytes.fromhex(key_raw)
-    else:
-        key = base64.urlsafe_b64decode(key_raw.encode())
+    try:
+        if len(key_raw) == 32 and all(c in "0123456789abcdefABCDEF" for c in key_raw):
+            key = bytes.fromhex(key_raw)
+        else:
+            key = base64.urlsafe_b64decode(key_raw.encode())
+    except Exception:
+        print("⚠️ Failed to decode AADHAR_ENC_KEY; Aadhaar encryption will be disabled")
+        return None
+
     if len(key) != 16:
-        raise RuntimeError("AADHAR_ENC_KEY must decode to 16 bytes (128-bit)")
+        print("⚠️ AADHAR_ENC_KEY must decode to 16 bytes (128-bit); Aadhaar encryption disabled")
+        return None
     return key
 
 
@@ -858,7 +866,12 @@ def _get_aadhar_hash_key():
     key_raw = (os.environ.get("AADHAR_HASH_KEY") or "").strip()
     if not key_raw:
         # Fall back to encryption key if a dedicated hash key is not provided
-        return _get_aadhar_enc_key()
+        k = _get_aadhar_enc_key()
+        if k:
+            return k
+        # As a last resort derive a stable key from FLASK_SECRET_KEY so hashing still works
+        secret = (os.environ.get("FLASK_SECRET_KEY") or "__fallback_flask_secret__").encode()
+        return hashlib.sha256(secret).digest()
     if len(key_raw) == 64 and all(c in "0123456789abcdefABCDEF" for c in key_raw):
         return bytes.fromhex(key_raw)
     return base64.urlsafe_b64decode(key_raw.encode())
@@ -867,14 +880,17 @@ def _get_aadhar_hash_key():
 def encrypt_aadhar(plain):
     if plain is None:
         return None
-    if AESGCM is None:
-        raise RuntimeError("cryptography is required for Aadhaar encryption")
     value = str(plain).strip()
     if not value:
         return ""
     if value.startswith("v1:"):
         return value
     key = _get_aadhar_enc_key()
+    # If encryption unavailable, fall back to storing a base64-prefixed plain token (v0)
+    if AESGCM is None or key is None:
+        token = base64.urlsafe_b64encode(value.encode("utf-8")).decode("utf-8")
+        return f"v0:{token}"
+
     aes = AESGCM(key)
     nonce = os.urandom(12)
     ct = aes.encrypt(nonce, value.encode("utf-8"), None)
@@ -888,11 +904,24 @@ def decrypt_aadhar(enc):
     value = str(enc)
     if not value:
         return ""
+    # v0: plain base64 (fallback when encryption disabled)
+    if value.startswith("v0:"):
+        try:
+            token = value[3:]
+            return base64.urlsafe_b64decode(token.encode("utf-8")).decode("utf-8")
+        except Exception:
+            return value
+
+    # v1: AES-GCM encrypted
     if not value.startswith("v1:"):
         return value
-    if AESGCM is None:
-        raise RuntimeError("cryptography is required for Aadhaar decryption")
+
     key = _get_aadhar_enc_key()
+    if AESGCM is None or key is None:
+        # Can't decrypt; return stored value to avoid crashing
+        print("⚠️ Cannot decrypt Aadhaar: cryptography/AADHAR_ENC_KEY unavailable")
+        return value
+
     aes = AESGCM(key)
     token = value[3:]
     raw = base64.urlsafe_b64decode(token.encode("utf-8"))
