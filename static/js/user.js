@@ -136,16 +136,7 @@ function createQuestionElement(question, questionNumber) {
         childContainer.className = 'child-questions';
         childContainer.style.display = 'none';
 
-        // Create a container per option to preserve option ordering for subquestions
-        const optionChildMap = {};
-        question.options.forEach(opt => {
-            const optWrap = document.createElement('div');
-            optWrap.className = 'option-children';
-            optWrap.dataset.optionId = String(opt.option_id);
-            optWrap.style.display = 'none';
-            optionChildMap[String(opt.option_id)] = optWrap;
-            childContainer.appendChild(optWrap);
-        });
+        // (Removed per-option wrapper map; child questions rebuilt dynamically)
 
         // Helper to clear responses for a question subtree
         function clearSubtreeResponses(q) {
@@ -192,36 +183,29 @@ function createQuestionElement(question, questionNumber) {
                     currentResponses[question.question_id] = String(option.option_id);
                 }
 
-                // 🔥 FIXED CHILD VISIBILITY LOGIC
+                // 🔥 REBUILD CHILD QUESTIONS CLEANLY
                 if (childQuestions && childQuestions.length > 0) {
 
                     const activeValues = isMultiple
                         ? (currentResponses[question.question_id] || [])
                         : [currentResponses[question.question_id]];
 
-                    let anyVisible = false;
+                    childContainer.innerHTML = '';
 
-                    question.options.forEach(opt => {
-                        const optId = String(opt.option_id);
-                        const wrapper = optionChildMap[optId];
+                    childQuestions.forEach((child, idx) => {
+                        if (activeValues.includes(String(child.trigger_value))) {
 
-                        const isActive = activeValues.includes(optId);
+                            const childEl = createQuestionElement(
+                                child,
+                                `${questionNumber}.${idx + 1}`
+                            );
 
-                        if (wrapper) {
-                            if (isActive) {
-                                wrapper.style.display = '';
-                                wrapper.querySelectorAll('.question-item')
-                                    .forEach(el => el.style.display = '');
-                                anyVisible = true;
-                            } else {
-                                wrapper.querySelectorAll('.question-item')
-                                    .forEach(el => el.style.display = 'none');
-                                wrapper.style.display = 'none';
-                            }
+                            childContainer.appendChild(childEl);
                         }
                     });
 
-                    childContainer.style.display = anyVisible ? '' : 'none';
+                    childContainer.style.display =
+                        childContainer.children.length > 0 ? '' : 'none';
                 }
 
                 saveProgress();
@@ -236,53 +220,27 @@ function createQuestionElement(question, questionNumber) {
             optionsContainer.appendChild(optionDiv);
         });
 
-        // Render child question elements (hidden by default) into their option wrapper
-        childQuestions.forEach((cq, idx) => {
-            const childEl = createQuestionElement(cq, `${questionNumber}.${idx+1}`);
-            childEl.style.display = 'none';
-            const trigger = String(cq.trigger_value || '').trim();
-            let placed = false;
-            question.options.forEach(opt => {
-                if (trigger === String(opt.option_id) || trigger === String(opt.option_text)) {
-                    const wrap = optionChildMap[String(opt.option_id)];
-                    if (wrap) {
-                        wrap.appendChild(childEl);
-                        placed = true;
-                    }
-                }
-            });
-            if (!placed) {
-                // fallback: append to container root
-                childContainer.appendChild(childEl);
-            }
-        });
+        // (Child question elements are created dynamically when options change)
 
-        // Initialize child visibility based on existing answers
+        // Initialize child visibility
         if (childQuestions.length > 0) {
-            const activeValues = isMultiple ? (Array.isArray(existingAnswer) ? existingAnswer : []) : [existingAnswer];
-            let anyVisible = false;
-            question.options.forEach(opt => {
-                const optId = String(opt.option_id);
-                const optText = opt.option_text;
-                const wrapper = optionChildMap[optId];
-                        const isActive = activeValues.some(v => v !== null && v !== undefined && (String(v) === String(opt.option_id) || String(v) === String(opt.option_text)));
-                if (wrapper) {
-                    if (isActive) {
-                        wrapper.style.display = '';
-                        wrapper.querySelectorAll('.question-item').forEach(el => el.style.display = '');
-                        anyVisible = true;
-                    } else {
-                        wrapper.querySelectorAll('.question-item').forEach(el => {
-                            const qid = el.dataset.questionId;
-                            const qObj = (currentSection.questions || []).find(x => String(x.question_id) === String(qid));
-                            if (qObj) clearSubtreeResponses(qObj);
-                            el.style.display = 'none';
-                        });
-                        wrapper.style.display = 'none';
-                    }
+
+            const activeValues = isMultiple
+                ? (Array.isArray(existingAnswer) ? existingAnswer : [])
+                : [existingAnswer];
+
+            childQuestions.forEach((child, idx) => {
+                if (activeValues.includes(String(child.trigger_value))) {
+                    const childEl = createQuestionElement(
+                        child,
+                        `${questionNumber}.${idx + 1}`
+                    );
+                    childContainer.appendChild(childEl);
                 }
             });
-            childContainer.style.display = anyVisible ? '' : 'none';
+
+            childContainer.style.display =
+                childContainer.children.length > 0 ? '' : 'none';
         }
 
         answerElement = document.createElement('div');
