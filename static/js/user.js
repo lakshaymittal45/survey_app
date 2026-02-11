@@ -162,7 +162,7 @@ function createQuestionElement(question, questionNumber) {
             const input = document.createElement('input');
             input.type = isMultiple ? 'checkbox' : 'radio';
             input.name = `question_${question.question_id}` + (isMultiple ? `_${option.option_id}` : '');
-            input.value = option.option_text;
+            input.value = String(option.option_id);
             input.id = `option_${option.option_id}`;
 
             if (isMultiple && Array.isArray(existingAnswer) && existingAnswer.includes(option.option_text)) {
@@ -172,42 +172,50 @@ function createQuestionElement(question, questionNumber) {
             }
 
             input.addEventListener('change', () => {
+
                 if (isMultiple) {
-                    const arr = Array.isArray(currentResponses[question.question_id]) ? currentResponses[question.question_id].slice() : [];
+                    const arr = Array.isArray(currentResponses[question.question_id])
+                        ? currentResponses[question.question_id].slice()
+                        : [];
+
+                    const value = String(option.option_id);
+
                     if (input.checked) {
-                        if (!arr.includes(option.option_text)) arr.push(option.option_text);
+                        if (!arr.includes(value)) arr.push(value);
                     } else {
-                        const idx = arr.indexOf(option.option_text);
+                        const idx = arr.indexOf(value);
                         if (idx !== -1) arr.splice(idx, 1);
                     }
+
                     currentResponses[question.question_id] = arr;
                 } else {
-                    currentResponses[question.question_id] = option.option_text;
+                    currentResponses[question.question_id] = String(option.option_id);
                 }
 
-                // Show/hide child questions grouped by parent option
+                // 🔥 FIXED CHILD VISIBILITY LOGIC
                 if (childQuestions && childQuestions.length > 0) {
-                    const activeValues = isMultiple ? (currentResponses[question.question_id] || []) : [currentResponses[question.question_id]];
+
+                    const activeValues = isMultiple
+                        ? (currentResponses[question.question_id] || [])
+                        : [currentResponses[question.question_id]];
 
                     let anyVisible = false;
-                    // For each option's child wrapper, show if that option is active
+
                     question.options.forEach(opt => {
                         const optId = String(opt.option_id);
-                        const optText = opt.option_text;
                         const wrapper = optionChildMap[optId];
-                        const isActive = activeValues.some(v => v !== null && v !== undefined && (String(v) === optId || String(v) === optText));
+
+                        const isActive = activeValues.includes(optId);
+
                         if (wrapper) {
                             if (isActive) {
                                 wrapper.style.display = '';
-                                // show children inside
-                                wrapper.querySelectorAll('.question-item').forEach(el => el.style.display = '');
+                                wrapper.querySelectorAll('.question-item')
+                                    .forEach(el => el.style.display = '');
                                 anyVisible = true;
                             } else {
-                                // hide and clear
-                                wrapper.querySelectorAll('.question-item').forEach(el => el.style.display = 'none');
-                                // clear responses for hidden subtree
-                                const childrenQs = (currentSection.questions || []).filter(x => String(x.parent_id) === String(question.question_id) && (String(x.trigger_value || '') === optId || String(x.trigger_value || '') === optText));
-                                childrenQs.forEach(cq => clearSubtreeResponses(cq));
+                                wrapper.querySelectorAll('.question-item')
+                                    .forEach(el => el.style.display = 'none');
                                 wrapper.style.display = 'none';
                             }
                         }
@@ -257,7 +265,7 @@ function createQuestionElement(question, questionNumber) {
                 const optId = String(opt.option_id);
                 const optText = opt.option_text;
                 const wrapper = optionChildMap[optId];
-                const isActive = activeValues.some(v => v !== null && v !== undefined && (String(v) === optId || String(v) === optText));
+                        const isActive = activeValues.some(v => v !== null && v !== undefined && String(v) === String(opt.option_id));
                 if (wrapper) {
                     if (isActive) {
                         wrapper.style.display = '';
