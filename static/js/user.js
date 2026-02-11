@@ -123,40 +123,124 @@ function createQuestionElement(question, questionNumber) {
     // Answer input based on question type and answer type
     let answerElement;
     
-    if (question.question_type === 'multiple_choice' && question.options && question.options.length > 0) {
-        // Multiple choice with radio buttons
+    if (question.options && question.options.length > 0) {
+        // Determine input type: single_choice -> radio, multiple_choice -> checkbox
+        const isMultiple = question.question_type === 'multiple_choice';
         const optionsContainer = document.createElement('div');
         optionsContainer.className = 'options-container';
-        
+
+        // Find child questions (same section) that reference this question as parent
+        const currentSection = questionnaireData.sections[currentSectionIndex] || { questions: [] };
+        const childQuestions = (currentSection.questions || []).filter(q => q.parent_id === question.question_id);
+        const childContainer = document.createElement('div');
+        childContainer.className = 'child-questions';
+        childContainer.style.display = 'none';
+
+        // Helper to clear responses for a question subtree
+        function clearSubtreeResponses(q) {
+            if (!q) return;
+            currentResponses[q.question_id] = null;
+            const children = (currentSection.questions || []).filter(x => x.parent_id === q.question_id);
+            children.forEach(c => clearSubtreeResponses(c));
+        }
+
         question.options.forEach(option => {
             const optionDiv = document.createElement('div');
             optionDiv.className = 'option-item';
-            
-            const radio = document.createElement('input');
-            radio.type = 'radio';
-            radio.name = `question_${question.question_id}`;
-            radio.value = option.option_text;
-            radio.id = `option_${option.option_id}`;
-            
-            if (existingAnswer === option.option_text) {
-                radio.checked = true;
+
+            const input = document.createElement('input');
+            input.type = isMultiple ? 'checkbox' : 'radio';
+            input.name = `question_${question.question_id}` + (isMultiple ? `_${option.option_id}` : '');
+            input.value = option.option_text;
+            input.id = `option_${option.option_id}`;
+
+            if (isMultiple && Array.isArray(existingAnswer) && existingAnswer.includes(option.option_text)) {
+                input.checked = true;
+            } else if (!isMultiple && existingAnswer === option.option_text) {
+                input.checked = true;
             }
-            
-            radio.addEventListener('change', () => {
-                currentResponses[question.question_id] = option.option_text;
+
+            input.addEventListener('change', () => {
+                if (isMultiple) {
+                    const arr = Array.isArray(currentResponses[question.question_id]) ? currentResponses[question.question_id].slice() : [];
+                    if (input.checked) {
+                        if (!arr.includes(option.option_text)) arr.push(option.option_text);
+                    } else {
+                        const idx = arr.indexOf(option.option_text);
+                        if (idx !== -1) arr.splice(idx, 1);
+                    }
+                    currentResponses[question.question_id] = arr;
+                } else {
+                    currentResponses[question.question_id] = option.option_text;
+                }
+
+                // Show/hide child questions based on trigger_value
+                if (childQuestions && childQuestions.length > 0) {
+                    // Determine which triggers are active
+                    const activeValues = isMultiple ? (currentResponses[question.question_id] || []) : [currentResponses[question.question_id]];
+
+                    // For each child, check if any active value matches child's trigger_value (or option id)
+                    let anyVisible = false;
+                    childContainer.querySelectorAll('.question-item').forEach(el => el.style.display = 'none');
+                    childQuestions.forEach(childQ => {
+                        const trigger = String(childQ.trigger_value || '').trim();
+                        const matches = activeValues.some(v => v !== null && v !== undefined && String(v) === trigger);
+                        const finalShow = trigger ? matches : false;
+                        const childEl = childContainer.querySelector(`[data-question-id='${childQ.question_id}']`);
+                        if (finalShow && childEl) {
+                            childEl.style.display = '';
+                            anyVisible = true;
+                        } else if (childEl) {
+                            // clear hidden child's responses
+                            clearSubtreeResponses(childQ);
+                            childEl.style.display = 'none';
+                        }
+                    });
+
+                    childContainer.style.display = anyVisible ? '' : 'none';
+                }
+
                 saveProgress();
             });
-            
+
             const label = document.createElement('label');
             label.htmlFor = `option_${option.option_id}`;
             label.textContent = option.option_text;
-            
-            optionDiv.appendChild(radio);
+
+            optionDiv.appendChild(input);
             optionDiv.appendChild(label);
             optionsContainer.appendChild(optionDiv);
         });
-        
-        answerElement = optionsContainer;
+
+        // Render child question elements (hidden by default)
+        childQuestions.forEach((cq, idx) => {
+            const childEl = createQuestionElement(cq, `${questionNumber}.${idx+1}`);
+            childEl.style.display = 'none';
+            childContainer.appendChild(childEl);
+        });
+
+        // Initialize child visibility based on existing answers
+        if (childQuestions.length > 0) {
+            const activeValues = isMultiple ? (Array.isArray(existingAnswer) ? existingAnswer : []) : [existingAnswer];
+            let anyVisible = false;
+            childQuestions.forEach(childQ => {
+                const trigger = String(childQ.trigger_value || '').trim();
+                const matches = activeValues.some(v => v !== null && v !== undefined && String(v) === trigger);
+                const childEl = childContainer.querySelector(`[data-question-id='${childQ.question_id}']`);
+                if (matches && childEl) {
+                    childEl.style.display = '';
+                    anyVisible = true;
+                } else if (childEl) {
+                    clearSubtreeResponses(childQ);
+                    childEl.style.display = 'none';
+                }
+            });
+            childContainer.style.display = anyVisible ? '' : 'none';
+        }
+
+        answerElement = document.createElement('div');
+        answerElement.appendChild(optionsContainer);
+        if (childQuestions.length > 0) answerElement.appendChild(childContainer);
         
     } else if (question.answer_type === 'numerical') {
         // Numerical input
