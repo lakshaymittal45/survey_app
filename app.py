@@ -1263,17 +1263,15 @@ def normalize_question_payload(data: dict):
     if parent_id == 0:
         parent_id = None
 
-    # Initialize trigger_value safely
+    # Initialize and normalize trigger_value
     trigger_value = data.get("trigger_value")
 
-    if trigger_value is None:
+    if not trigger_value:
         trigger_value = None
-    elif isinstance(trigger_value, str):
-        trigger_value = trigger_value.strip()
+    else:
+        trigger_value = str(trigger_value).strip()
         if trigger_value == "":
             trigger_value = None
-    else:
-        trigger_value = str(trigger_value)
 
 
     # Only choice questions should keep options
