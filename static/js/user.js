@@ -106,6 +106,7 @@ function displayCurrentSection() {
 
 // ==================== CREATE QUESTION ELEMENT ====================
 
+
 function createQuestionElement(question, questionNumber) {
     const questionDiv = document.createElement('div');
     questionDiv.className = 'question-item';
@@ -123,144 +124,40 @@ function createQuestionElement(question, questionNumber) {
     // Answer input based on question type and answer type
     let answerElement;
     
-    if (question.options && question.options.length > 0) {
-        // Determine input type: single_choice -> radio, multiple_choice -> checkbox
-        const isMultiple = question.question_type === 'multiple_choice';
+    if (question.question_type === 'multiple_choice' && question.options && question.options.length > 0) {
+        // Multiple choice with radio buttons
         const optionsContainer = document.createElement('div');
         optionsContainer.className = 'options-container';
-
-        // Use precomputed children if available
-        const childQuestions = question.children || [];
-        const childContainer = document.createElement('div');
-        childContainer.className = 'child-questions';
-        childContainer.style.display = 'none';
-
-        // (Removed per-option wrapper map; child questions rebuilt dynamically)
-
-        // (Removed helper: subtree response clearing is handled during rebuild)
-
+        
         question.options.forEach(option => {
             const optionDiv = document.createElement('div');
             optionDiv.className = 'option-item';
-
-            const input = document.createElement('input');
-            input.type = isMultiple ? 'checkbox' : 'radio';
-            input.name = `question_${question.question_id}` + (isMultiple ? `_${option.option_id}` : '');
-            input.value = option.option_text;
-            input.id = `option_${option.option_id}`;
-
-            if (isMultiple && Array.isArray(existingAnswer) && (existingAnswer.includes(String(option.option_id)) || existingAnswer.includes(option.option_text))) {
-                input.checked = true;
-            } else if (!isMultiple && (String(existingAnswer) === String(option.option_id) || existingAnswer === option.option_text)) {
-                input.checked = true;
+            
+            const radio = document.createElement('input');
+            radio.type = 'radio';
+            radio.name = `question_${question.question_id}`;
+            radio.value = option.option_text;
+            radio.id = `option_${option.option_id}`;
+            
+            if (existingAnswer === option.option_text) {
+                radio.checked = true;
             }
-
-            input.addEventListener('change', () => {
-
-                if (isMultiple) {
-                    const arr = Array.isArray(currentResponses[question.question_id])
-                        ? currentResponses[question.question_id].slice()
-                        : [];
-
-                    const value = option.option_text;
-
-                    if (input.checked) {
-                        if (!arr.includes(value)) arr.push(value);
-                    } else {
-                        const idx = arr.indexOf(value);
-                        if (idx !== -1) arr.splice(idx, 1);
-                    }
-
-                    currentResponses[question.question_id] = arr;
-                } else {
-                    currentResponses[question.question_id] = option.option_text;
-                }
-
-                // 🔥 CLEAN REBUILD CHILDREN
-                if (childQuestions && childQuestions.length > 0) {
-
-                    let activeValues;
-
-                    if (isMultiple) {
-                        activeValues = Array.isArray(currentResponses[question.question_id])
-                            ? currentResponses[question.question_id]
-                            : [];
-                    } else {
-                        activeValues = currentResponses[question.question_id]
-                            ? [currentResponses[question.question_id]]
-                            : [];
-                    }
-
-                    // Clear previous children completely
-                    childContainer.innerHTML = '';
-
-
-                    childQuestions.forEach((child, idx) => {
-
-                        if (
-                            activeValues.some(
-                                v => String(v).trim() === String(child.trigger_value).trim()
-                            )
-                        ) {
-
-                            const childEl = createQuestionElement(
-                                child,
-                                `${questionNumber}.${idx + 1}`
-                            );
-
-                            childContainer.appendChild(childEl);
-                        } else {
-                            // Also clear response if not active
-                            delete currentResponses[child.question_id];
-                        }
-                    });
-
-                    childContainer.style.display =
-                        childContainer.children.length > 0 ? '' : 'none';
-                }
-
+            
+            radio.addEventListener('change', () => {
+                currentResponses[question.question_id] = option.option_text;
                 saveProgress();
             });
-
+            
             const label = document.createElement('label');
             label.htmlFor = `option_${option.option_id}`;
             label.textContent = option.option_text;
-
-            optionDiv.appendChild(input);
+            
+            optionDiv.appendChild(radio);
             optionDiv.appendChild(label);
             optionsContainer.appendChild(optionDiv);
         });
-
-        // (Child question elements are created dynamically when options change)
-
-        // Initialize child visibility
-        if (childQuestions.length > 0) {
-
-            const activeValues = isMultiple
-                ? (Array.isArray(existingAnswer) ? existingAnswer : [])
-                : [existingAnswer];
-
-                    childQuestions.forEach((child, idx) => {
-                        if (
-                            activeValues.some(
-                                v => String(v).trim() === String(child.trigger_value).trim()
-                            )
-                        ) {
-                    const childEl = createQuestionElement(
-                        child,
-                        `${questionNumber}.${idx + 1}`
-                    );
-                    childContainer.appendChild(childEl);
-                }
-            });
-
-            childContainer.style.display =
-                childContainer.children.length > 0 ? '' : 'none';
-        }
-
-        answerElement = document.createElement('div');
-        answerElement.appendChild(optionsContainer);
-        if (childQuestions.length > 0) answerElement.appendChild(childContainer);
+        
+        answerElement = optionsContainer;
         
     } else if (question.answer_type === 'numerical') {
         // Numerical input

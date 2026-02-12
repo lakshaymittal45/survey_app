@@ -994,6 +994,69 @@
             onchange="uploadBulkLocations('villages', 'bulkVillageFile')"
           />
         </div>
+
+        <!-- Add Household -->
+        <h3 style="margin-top: 40px; color: #667eea">Add New Household</h3>
+        <div class="form-container">
+          <div class="form-row">
+            <div class="form-group">
+              <label>State *</label>
+              <select id="householdState" required onchange="updateHouseholdDistricts()">
+                <option value="">Select State</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label>District *</label>
+              <select id="householdDistrict" required onchange="loadHouseholdBlocks()">
+                <option value="">Select District</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label>Block *</label>
+              <select id="householdBlock" required onchange="loadHouseholdSubCenters()">
+                <option value="">Select Block</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label>Sub-centre *</label>
+              <select id="householdSubCenter" required onchange="loadHouseholdVillages()">
+                <option value="">Select Sub-centre</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label>Village *</label>
+              <select id="householdVillage" required>
+                <option value="">Select Village</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label>Household ID *</label>
+              <input type="text" id="householdCode" placeholder="e.g., HBCH/001" />
+            </div>
+          </div>
+          <button class="btn btn-primary" onclick="addHouseholdRegistry()">
+            Add Household
+          </button>
+          <div id="householdRegistryMessage" class="inline-message"></div>
+          <div class="muted" style="margin-top: 8px">
+            Bulk upload: Column A = State, Column B = District, Column C = Block,
+            Column D = Sub-centre, Column E = Village, Column F = Household ID,
+            without any headers.
+          </div>
+          <button
+            class="btn btn-secondary"
+            onclick="triggerBulkFile('bulkHouseholdFile')"
+          >
+            Import Excel
+          </button>
+          <input
+            type="file"
+            id="bulkHouseholdFile"
+            accept=".xlsx,.xls"
+            style="display: none"
+            onchange="uploadBulkLocations('households', 'bulkHouseholdFile')"
+          />
+        </div>
       </div>
 
       <!-- Questionnaire Tab -->
@@ -1050,6 +1113,50 @@
                 >
                   <option value="">Select Section...</option>
                 </select>
+              </div>
+
+              <!-- Edit Question -->
+              <div style="margin-bottom: 15px">
+                <label
+                  style="
+                    font-weight: 600;
+                    color: #2c3e50;
+                    display: flex;
+                    align-items: center;
+                    gap: 6px;
+                    margin-bottom: 8px;
+                  "
+                >
+                  Edit Question
+                  <svg
+                    aria-hidden="true"
+                    viewBox="0 0 16 16"
+                    width="14"
+                    height="14"
+                    style="fill: #667eea"
+                  >
+                    <path
+                      d="M11.013 1.427a1.75 1.75 0 012.475 0l1.085 1.085a1.75 1.75 0 010 2.475L6.2 13.36a2 2 0 01-.878.51l-3.2.8a.75.75 0 01-.91-.91l.8-3.2a2 2 0 01.51-.878l8.491-8.49zM12.5 2.94L3.56 11.88a.5.5 0 00-.128.219l-.55 2.2 2.2-.55a.5.5 0 00.219-.128l8.94-8.94L12.5 2.94zm1.56 1.56l.647-.647a.25.25 0 000-.354l-1.085-1.085a.25.25 0 00-.354 0l-.647.647 1.44 1.44z"
+                    />
+                  </svg>
+                </label>
+                <select
+                  id="qm_edit_question_id"
+                  onchange="handleQmEditSelection()"
+                  style="
+                    width: 100%;
+                    padding: 10px;
+                    border: 2px solid #e0e0e0;
+                    border-radius: 6px;
+                    font-family: inherit;
+                    font-size: 1em;
+                  "
+                >
+                  <option value="">Select a question to edit...</option>
+                </select>
+                <div class="muted" style="margin-top: 6px">
+                  Pick a question to prefill the form for editing.
+                </div>
               </div>
 
               <!-- Parent Selection -->
@@ -1198,6 +1305,7 @@
               <button
                 type="submit"
                 class="btn btn-primary"
+                id="qm_submit_btn"
                 style="width: 100%; padding: 12px; cursor: pointer"
               >
                 Save & Add Question
@@ -1338,6 +1446,50 @@
                 >
                   <option value="">Select Section...</option>
                 </select>
+              </div>
+
+              <!-- Edit Question -->
+              <div style="margin-bottom: 15px">
+                <label
+                  style="
+                    font-weight: 600;
+                    color: #2c3e50;
+                    display: flex;
+                    align-items: center;
+                    gap: 6px;
+                    margin-bottom: 8px;
+                  "
+                >
+                  Edit Question
+                  <svg
+                    aria-hidden="true"
+                    viewBox="0 0 16 16"
+                    width="14"
+                    height="14"
+                    style="fill: #667eea"
+                  >
+                    <path
+                      d="M11.013 1.427a1.75 1.75 0 012.475 0l1.085 1.085a1.75 1.75 0 010 2.475L6.2 13.36a2 2 0 01-.878.51l-3.2.8a.75.75 0 01-.91-.91l.8-3.2a2 2 0 01.51-.878l8.491-8.49zM12.5 2.94L3.56 11.88a.5.5 0 00-.128.219l-.55 2.2 2.2-.55a.5.5 0 00.219-.128l8.94-8.94L12.5 2.94zm1.56 1.56l.647-.647a.25.25 0 000-.354l-1.085-1.085a.25.25 0 00-.354 0l-.647.647 1.44 1.44z"
+                    />
+                  </svg>
+                </label>
+                <select
+                  id="iqm_edit_question_id"
+                  onchange="handleIqmEditSelection()"
+                  style="
+                    width: 100%;
+                    padding: 10px;
+                    border: 2px solid #e0e0e0;
+                    border-radius: 6px;
+                    font-family: inherit;
+                    font-size: 1em;
+                  "
+                >
+                  <option value="">Select a question to edit...</option>
+                </select>
+                <div class="muted" style="margin-top: 6px">
+                  Pick a question to prefill the form for editing.
+                </div>
               </div>
 
               <!-- Parent Selection -->
@@ -1486,6 +1638,7 @@
               <button
                 type="submit"
                 class="btn btn-primary"
+                id="iqm_submit_btn"
                 style="width: 100%; padding: 12px; cursor: pointer"
               >
                 Save & Add Question
@@ -2039,11 +2192,39 @@
         if (el) el.click();
       }
 
+      function getBulkInlineMessageId(level) {
+        switch (String(level || "").toLowerCase()) {
+          case "state":
+          case "states":
+            return "stateMessage";
+          case "district":
+          case "districts":
+            return "districtMessage";
+          case "block":
+          case "blocks":
+            return "blockMessage";
+          case "subcenter":
+          case "subcentre":
+          case "subcenters":
+          case "subcentres":
+            return "subCenterMessage";
+          case "village":
+          case "villages":
+            return "villageMessage";
+          case "household":
+          case "households":
+            return "householdRegistryMessage";
+          default:
+            return null;
+        }
+      }
+
       async function uploadBulkLocations(level, fileInputId) {
         const input = document.getElementById(fileInputId);
         if (!input || !input.files || input.files.length === 0) return;
         const fd = new FormData();
         fd.append("file", input.files[0]);
+        const inlineId = getBulkInlineMessageId(level);
 
         try {
           const res = await apiFetch(`/api/admin/locations/bulk/${level}`, {
@@ -2054,18 +2235,22 @@
           if (!res.ok || !result.success) {
             const msg = result.error || "Bulk upload failed";
             showMessage(msg, "error");
+            if (inlineId) showInlineMessage(inlineId, msg, "error");
             if (result.details && result.details.errors) {
               console.error(result.details.errors);
             }
           } else {
-            const warn =
-              result.errors && result.errors.length
-                ? ` (Some rows failed: ${result.errors.length})`
-                : "";
-            showMessage(
-              `Bulk upload complete. Inserted: ${result.inserted}, Skipped: ${result.skipped}${warn}`,
-              "success",
-            );
+            const warnParts = [];
+            if (result.errors && result.errors.length) {
+              warnParts.push(`row errors: ${result.errors.length}`);
+            }
+            if (result.parse_errors && result.parse_errors.length) {
+              warnParts.push(`parse errors: ${result.parse_errors.length}`);
+            }
+            const warn = warnParts.length ? ` (${warnParts.join(", ")})` : "";
+            const msg = `Bulk upload complete. Inserted: ${result.inserted}, Skipped: ${result.skipped}${warn}`;
+            showMessage(msg, "success");
+            if (inlineId) showInlineMessage(inlineId, msg, "success");
             if (result.errors && result.errors.length) {
               console.error(result.errors);
             }
@@ -2075,7 +2260,9 @@
             await loadAllSubCenters();
           }
         } catch (e) {
-          showMessage("Bulk upload error: " + e.message, "error");
+          const msg = "Bulk upload error: " + e.message;
+          showMessage(msg, "error");
+          if (inlineId) showInlineMessage(inlineId, msg, "error");
         } finally {
           input.value = "";
         }
@@ -2582,6 +2769,7 @@
         const blockStateEl = document.getElementById("blockState");
         const subCenterStateEl = document.getElementById("subCenterState");
         const villageStateEl = document.getElementById("villageState");
+        const householdStateEl = document.getElementById("householdState");
 
         const html = allStates
           .map(
@@ -2600,6 +2788,9 @@
             '<option value="">Select State</option>' + html;
         if (villageStateEl)
           villageStateEl.innerHTML =
+            '<option value="">Select State</option>' + html;
+        if (householdStateEl)
+          householdStateEl.innerHTML =
             '<option value="">Select State</option>' + html;
       }
 
@@ -2801,6 +2992,108 @@
           '<option value="">Select Block</option>';
         document.getElementById("villageSubCenter").innerHTML =
           '<option value="">Select Sub-centre</option>';
+      }
+
+      function updateHouseholdDistricts() {
+        const stateId = parseInt(
+          document.getElementById("householdState").value || "0",
+        );
+        const districts = stateId
+          ? allDistricts.filter((d) => d.state_id === stateId)
+          : [];
+        const el = document.getElementById("householdDistrict");
+        el.innerHTML =
+          '<option value="">Select District</option>' +
+          districts
+            .map(
+              (d) =>
+                `<option value="${d.district_id}">${escapeAttr(d.name)}</option>`,
+            )
+            .join("");
+        document.getElementById("householdBlock").innerHTML =
+          '<option value="">Select Block</option>';
+        document.getElementById("householdSubCenter").innerHTML =
+          '<option value="">Select Sub-centre</option>';
+        document.getElementById("householdVillage").innerHTML =
+          '<option value="">Select Village</option>';
+      }
+
+      function loadHouseholdBlocks() {
+        const districtId = parseInt(
+          document.getElementById("householdDistrict").value || "0",
+        );
+        const blocks = districtId
+          ? allBlocks.filter((b) => b.district_id === districtId)
+          : [];
+        const el = document.getElementById("householdBlock");
+        el.innerHTML =
+          '<option value="">Select Block</option>' +
+          blocks
+            .map(
+              (b) =>
+                `<option value="${b.block_id}">${escapeAttr(b.name)}</option>`,
+            )
+            .join("");
+        document.getElementById("householdSubCenter").innerHTML =
+          '<option value="">Select Sub-centre</option>';
+        document.getElementById("householdVillage").innerHTML =
+          '<option value="">Select Village</option>';
+      }
+
+      async function loadHouseholdSubCenters() {
+        const blockId = document.getElementById("householdBlock").value;
+        const el = document.getElementById("householdSubCenter");
+        if (!blockId) {
+          el.innerHTML = '<option value="">Select Sub-centre</option>';
+          document.getElementById("householdVillage").innerHTML =
+            '<option value="">Select Village</option>';
+          return;
+        }
+
+        try {
+          const resp = await apiFetch(
+            `/api/admin/all-sub-centers?block_id=${blockId}`,
+          );
+          const subCenters = await resp.json();
+          el.innerHTML =
+            '<option value="">Select Sub-centre</option>' +
+            subCenters
+              .map(
+                (sc) =>
+                  `<option value="${sc.sub_center_id}">${escapeAttr(sc.name)}</option>`,
+              )
+              .join("");
+          document.getElementById("householdVillage").innerHTML =
+            '<option value="">Select Village</option>';
+        } catch (error) {
+          showMessage("Error loading sub-centres: " + error.message, "error");
+        }
+      }
+
+      async function loadHouseholdVillages() {
+        const subCenterId = document.getElementById("householdSubCenter").value;
+        const el = document.getElementById("householdVillage");
+        if (!subCenterId) {
+          el.innerHTML = '<option value="">Select Village</option>';
+          return;
+        }
+
+        try {
+          const resp = await apiFetch(
+            `/api/admin/all-villages?sub_center_id=${subCenterId}`,
+          );
+          const villages = await resp.json();
+          el.innerHTML =
+            '<option value="">Select Village</option>' +
+            villages
+              .map(
+                (v) =>
+                  `<option value="${v.village_id}">${escapeAttr(v.name)}</option>`,
+              )
+              .join("");
+        } catch (error) {
+          showMessage("Error loading villages: " + error.message, "error");
+        }
       }
 
       async function addBlock() {
@@ -3122,6 +3415,48 @@
         }
       }
 
+      async function addHouseholdRegistry() {
+        const code = document.getElementById("householdCode").value.trim();
+        const villageId = document.getElementById("householdVillage").value;
+        if (!code || !villageId) {
+          showMessage("Village and Household ID are required", "error");
+          showInlineMessage(
+            "householdRegistryMessage",
+            "Village and Household ID are required",
+            "error",
+          );
+          return;
+        }
+
+        try {
+          const response = await apiFetch("/api/admin/household-registry", {
+            method: "POST",
+            body: JSON.stringify({
+              household_code: code,
+              village_id: parseInt(villageId),
+            }),
+          });
+          const result = await response.json();
+          if (result.success) {
+            showMessage("Household added successfully", "success");
+            showInlineMessage(
+              "householdRegistryMessage",
+              "Household added successfully",
+              "success",
+            );
+            document.getElementById("householdCode").value = "";
+          } else {
+            const msg = result.error || "Failed to add household";
+            showMessage(msg, "error");
+            showInlineMessage("householdRegistryMessage", msg, "error");
+          }
+        } catch (error) {
+          const msg = "Error: " + error.message;
+          showMessage(msg, "error");
+          showInlineMessage("householdRegistryMessage", msg, "error");
+        }
+      }
+
       function editVillage(code, name, districtId, blockId, subCenterId) {
         editingData = { type: "village", code };
 
@@ -3416,7 +3751,114 @@
       // ========= ADVANCED QUESTIONNAIRE MANAGEMENT =========
       let qmQuestionMap = {}; // track question options for trigger UI
       let iqmQuestionMap = {}; // track options for individual questionnaire trigger UI
+      let qmQuestionById = {};
+      let iqmQuestionById = {};
+      let qmEditingQuestionId = null;
+      let iqmEditingQuestionId = null;
+      let qmCurrentSectionId = null;
+      let iqmCurrentSectionId = null;
       let lastAadhaarLookup = null;
+
+      function buildQuestionIndex(questions) {
+        const byParent = {};
+        const byId = {};
+        questions.forEach((q) => {
+          byId[q.question_id] = q;
+          const parentId = q.parent_id || 0;
+          if (!byParent[parentId]) byParent[parentId] = [];
+          byParent[parentId].push(q);
+        });
+        const ordered = [];
+        const walk = (parentId, depth) => {
+          (byParent[parentId] || []).forEach((q) => {
+            ordered.push({
+              id: q.question_id,
+              text: q.question_text || "",
+              depth,
+            });
+            walk(q.question_id, depth + 1);
+          });
+        };
+        walk(0, 0);
+        return { byParent, byId, ordered };
+      }
+
+      function populateQuestionSelect(selectEl, items, noneValue, noneLabel) {
+        if (!selectEl) return;
+        selectEl.innerHTML = "";
+        const none = document.createElement("option");
+        none.value = noneValue;
+        none.textContent = noneLabel;
+        selectEl.appendChild(none);
+        items.forEach((item) => {
+          const opt = document.createElement("option");
+          opt.value = item.id;
+          const prefix = item.depth > 0 ? "-- ".repeat(item.depth) : "";
+          opt.textContent = `${prefix}${item.text}`;
+          selectEl.appendChild(opt);
+        });
+      }
+
+      function normalizeOptionsToArray(opts) {
+        if (!opts) return [];
+        if (Array.isArray(opts)) return opts;
+        if (typeof opts === "string") {
+          try {
+            const parsed = JSON.parse(opts);
+            if (Array.isArray(parsed)) return parsed;
+          } catch (e) {}
+          return opts
+            .split(",")
+            .map((o) => o.trim())
+            .filter(Boolean);
+        }
+        return [];
+      }
+
+      function optionsToCsv(opts) {
+        const list = normalizeOptionsToArray(opts);
+        return list.join(", ");
+      }
+
+      function mapDbQuestionToUiType(q) {
+        const qt = (q.question_type || "").toLowerCase();
+        const at = (q.answer_type || "").toLowerCase();
+        if (qt === "single_choice" || qt === "mcq") return "mcq";
+        if (qt === "multiple_choice" || qt === "checkbox") return "checkbox";
+        if (qt === "open_ended" && at === "numerical") return "number";
+        return "text";
+      }
+
+      function setTriggerFieldValue(wrapperId, value) {
+        if (value === null || value === undefined || value === "") return;
+        const wrapper = document.getElementById(wrapperId);
+        if (!wrapper) return;
+        const field = wrapper.querySelector("input, select");
+        if (!field) return;
+        const strValue = String(value);
+        if (field.tagName === "SELECT") {
+          const exists = Array.from(field.options).some(
+            (o) => o.value === strValue,
+          );
+          if (!exists) {
+            const opt = document.createElement("option");
+            opt.value = strValue;
+            opt.textContent = strValue;
+            field.appendChild(opt);
+          }
+        }
+        field.value = strValue;
+      }
+
+      function setQmSubmitLabel(isEditing) {
+        const btn = document.getElementById("qm_submit_btn");
+        if (btn) btn.textContent = isEditing ? "Update Question" : "Save & Add Question";
+      }
+
+      function setIqmSubmitLabel(isEditing) {
+        const btn = document.getElementById("iqm_submit_btn");
+        if (btn) btn.textContent = isEditing ? "Update Question" : "Save & Add Question";
+      }
 
       async function loadQuestionnaireSections() {
         try {
@@ -3454,36 +3896,45 @@
           );
           const questions = await response.json();
 
-          // Build parent dropdown
+          const index = buildQuestionIndex(questions);
+          qmQuestionById = index.byId;
+
+          // Build parent + edit dropdowns (with indentation)
           const parentSelect = document.getElementById("qm_parent_id");
+          const editSelect = document.getElementById("qm_edit_question_id");
+          populateQuestionSelect(
+            parentSelect,
+            index.ordered,
+            "0",
+            "None (Root Question)",
+          );
+          populateQuestionSelect(
+            editSelect,
+            index.ordered,
+            "",
+            "Select a question to edit...",
+          );
+
+          // Store options for trigger UI
           qmQuestionMap = {};
-
-          parentSelect.innerHTML =
-            '<option value="0">None (Root Question)</option>';
-
           questions.forEach((q) => {
-            parentSelect.innerHTML += `<option value="${q.question_id}">${escapeAttr(q.question_text)}</option>`;
-            // Store options for trigger UI
-            if (q.options) {
-              let parsed = null;
-              try {
-                parsed =
-                  typeof q.options === "string"
-                    ? JSON.parse(q.options)
-                    : q.options;
-              } catch (e) {
-                parsed = String(q.options)
-                  .split(",")
-                  .map((o) => o.trim())
-                  .filter(Boolean);
-              }
-              if (Array.isArray(parsed)) {
-                qmQuestionMap[q.question_id] = parsed;
-              } else if (parsed) {
-                qmQuestionMap[q.question_id] = [String(parsed)];
-              }
-            }
+            const parsed = normalizeOptionsToArray(q.options);
+            if (parsed.length > 0) qmQuestionMap[q.question_id] = parsed;
           });
+
+          if (sectionId !== qmCurrentSectionId) {
+            qmCurrentSectionId = sectionId;
+            qmEditingQuestionId = null;
+            setQmSubmitLabel(false);
+            const form = document.getElementById("questionForm");
+            if (form) {
+              form.reset();
+              document.getElementById("qm_section_id").value = sectionId;
+            }
+            if (editSelect) editSelect.value = "";
+            if (parentSelect) parentSelect.value = "0";
+            document.getElementById("qm_trigger_container").style.display = "none";
+          }
 
           // Render tree visualization
           renderQuestionTree(questions);
@@ -3586,7 +4037,7 @@
         document.getElementById("qm_treeContainer").innerHTML = html;
       }
 
-      function updateTriggerUI() {
+      function updateTriggerUI(triggerValue = null) {
         const parentId = document.getElementById("qm_parent_id").value;
         const container = document.getElementById("qm_trigger_container");
         const wrapper = document.getElementById("qm_trigger_input_wrapper");
@@ -3608,6 +4059,42 @@
             options.map((o) => `<option>${escapeAttr(o)}</option>`).join("") +
             "</select>";
         }
+        if (triggerValue !== null && triggerValue !== undefined) {
+          setTriggerFieldValue("qm_trigger_input_wrapper", triggerValue);
+        }
+      }
+
+      function handleQmEditSelection() {
+        const editSelect = document.getElementById("qm_edit_question_id");
+        const selectedId = editSelect ? editSelect.value : "";
+
+        if (!selectedId) {
+          qmEditingQuestionId = null;
+          setQmSubmitLabel(false);
+          const form = document.getElementById("questionForm");
+          const sectionId = document.getElementById("qm_section_id").value;
+          if (form) {
+            form.reset();
+            document.getElementById("qm_section_id").value = sectionId;
+          }
+          document.getElementById("qm_parent_id").value = "0";
+          document.getElementById("qm_trigger_container").style.display = "none";
+          return;
+        }
+
+        const q = qmQuestionById[selectedId];
+        if (!q) return;
+
+        qmEditingQuestionId = parseInt(selectedId, 10);
+        setQmSubmitLabel(true);
+
+        document.getElementById("qm_question_text").value = q.question_text || "";
+        document.getElementById("qm_question_type").value = mapDbQuestionToUiType(q);
+        document.getElementById("qm_options").value = optionsToCsv(q.options);
+
+        const parentValue = q.parent_id ? String(q.parent_id) : "0";
+        document.getElementById("qm_parent_id").value = parentValue;
+        updateTriggerUI(q.trigger_value || "");
       }
 
       // Initialize form submission
@@ -3647,6 +4134,7 @@
               : null;
 
           try {
+            const isEditing = !!qmEditingQuestionId;
             const payload = {
               section_id: parseInt(sectionId),
               question_text: questionText,
@@ -3656,20 +4144,36 @@
               trigger_value: triggerValue,
             };
 
-            const response = await apiFetch("/api/admin/question", {
-              method: "POST",
-              body: JSON.stringify(payload),
-            });
+            const response = await apiFetch(
+              isEditing
+                ? `/api/admin/question/${qmEditingQuestionId}`
+                : "/api/admin/question",
+              {
+                method: isEditing ? "PUT" : "POST",
+                body: JSON.stringify(payload),
+              },
+            );
 
             const result = await response.json();
             if (result.success) {
-              showMessage("Question added successfully", "success");
+              showMessage(
+                isEditing
+                  ? "Question updated successfully"
+                  : "Question added successfully",
+                "success",
+              );
+              qmEditingQuestionId = null;
+              setQmSubmitLabel(false);
+              const editSelect = document.getElementById("qm_edit_question_id");
+              if (editSelect) editSelect.value = "";
               form.reset();
+              document.getElementById("qm_section_id").value = sectionId;
+              document.getElementById("qm_parent_id").value = "0";
               document.getElementById("qm_trigger_container").style.display =
                 "none";
               await loadQuestionTree();
             } else {
-              showMessage(result.error || "Failed to add question", "error");
+              showMessage(result.error || "Failed to save question", "error");
             }
           } catch (error) {
             showMessage("Error: " + error.message, "error");
@@ -3839,33 +4343,43 @@
           );
           const questions = await response.json();
 
-          const parentSelect = document.getElementById("iqm_parent_id");
-          iqmQuestionMap = {};
-          parentSelect.innerHTML =
-            '<option value="0">None (Root Question)</option>';
+          const index = buildQuestionIndex(questions);
+          iqmQuestionById = index.byId;
 
+          const parentSelect = document.getElementById("iqm_parent_id");
+          const editSelect = document.getElementById("iqm_edit_question_id");
+          populateQuestionSelect(
+            parentSelect,
+            index.ordered,
+            "0",
+            "None (Root Question)",
+          );
+          populateQuestionSelect(
+            editSelect,
+            index.ordered,
+            "",
+            "Select a question to edit...",
+          );
+
+          iqmQuestionMap = {};
           questions.forEach((q) => {
-            parentSelect.innerHTML += `<option value="${q.question_id}">${escapeAttr(q.question_text)}</option>`;
-            if (q.options) {
-              let parsed = null;
-              try {
-                parsed =
-                  typeof q.options === "string"
-                    ? JSON.parse(q.options)
-                    : q.options;
-              } catch (e) {
-                parsed = String(q.options)
-                  .split(",")
-                  .map((o) => o.trim())
-                  .filter(Boolean);
-              }
-              if (Array.isArray(parsed)) {
-                iqmQuestionMap[q.question_id] = parsed;
-              } else if (parsed) {
-                iqmQuestionMap[q.question_id] = [String(parsed)];
-              }
-            }
+            const parsed = normalizeOptionsToArray(q.options);
+            if (parsed.length > 0) iqmQuestionMap[q.question_id] = parsed;
           });
+
+          if (sectionId !== iqmCurrentSectionId) {
+            iqmCurrentSectionId = sectionId;
+            iqmEditingQuestionId = null;
+            setIqmSubmitLabel(false);
+            const form = document.getElementById("iqm_questionForm");
+            if (form) {
+              form.reset();
+              document.getElementById("iqm_section_id").value = sectionId;
+            }
+            if (editSelect) editSelect.value = "";
+            if (parentSelect) parentSelect.value = "0";
+            document.getElementById("iqm_trigger_container").style.display = "none";
+          }
 
           renderIndividualQuestionTree(questions);
         } catch (error) {
@@ -3968,7 +4482,7 @@
         document.getElementById("iqm_treeContainer").innerHTML = html;
       }
 
-      function updateIndividualTriggerUI() {
+      function updateIndividualTriggerUI(triggerValue = null) {
         const parentId = document.getElementById("iqm_parent_id").value;
         const container = document.getElementById("iqm_trigger_container");
         const wrapper = document.getElementById("iqm_trigger_input_wrapper");
@@ -3990,6 +4504,42 @@
             options.map((o) => `<option>${escapeAttr(o)}</option>`).join("") +
             "</select>";
         }
+        if (triggerValue !== null && triggerValue !== undefined) {
+          setTriggerFieldValue("iqm_trigger_input_wrapper", triggerValue);
+        }
+      }
+
+      function handleIqmEditSelection() {
+        const editSelect = document.getElementById("iqm_edit_question_id");
+        const selectedId = editSelect ? editSelect.value : "";
+
+        if (!selectedId) {
+          iqmEditingQuestionId = null;
+          setIqmSubmitLabel(false);
+          const form = document.getElementById("iqm_questionForm");
+          const sectionId = document.getElementById("iqm_section_id").value;
+          if (form) {
+            form.reset();
+            document.getElementById("iqm_section_id").value = sectionId;
+          }
+          document.getElementById("iqm_parent_id").value = "0";
+          document.getElementById("iqm_trigger_container").style.display = "none";
+          return;
+        }
+
+        const q = iqmQuestionById[selectedId];
+        if (!q) return;
+
+        iqmEditingQuestionId = parseInt(selectedId, 10);
+        setIqmSubmitLabel(true);
+
+        document.getElementById("iqm_question_text").value = q.question_text || "";
+        document.getElementById("iqm_question_type").value = mapDbQuestionToUiType(q);
+        document.getElementById("iqm_options").value = optionsToCsv(q.options);
+
+        const parentValue = q.parent_id ? String(q.parent_id) : "0";
+        document.getElementById("iqm_parent_id").value = parentValue;
+        updateIndividualTriggerUI(q.trigger_value || "");
       }
 
       function initIndividualQuestionnaireForm() {
@@ -4030,6 +4580,7 @@
               : null;
 
           try {
+            const isEditing = !!iqmEditingQuestionId;
             const payload = {
               section_id: parseInt(sectionId),
               question_text: questionText,
@@ -4039,20 +4590,36 @@
               trigger_value: triggerValue,
             };
 
-            const response = await apiFetch("/api/admin/individual-question", {
-              method: "POST",
-              body: JSON.stringify(payload),
-            });
+            const response = await apiFetch(
+              isEditing
+                ? `/api/admin/individual-question/${iqmEditingQuestionId}`
+                : "/api/admin/individual-question",
+              {
+                method: isEditing ? "PUT" : "POST",
+                body: JSON.stringify(payload),
+              },
+            );
 
             const result = await response.json();
             if (result.success) {
-              showMessage("Individual question added successfully", "success");
+              showMessage(
+                isEditing
+                  ? "Individual question updated successfully"
+                  : "Individual question added successfully",
+                "success",
+              );
+              iqmEditingQuestionId = null;
+              setIqmSubmitLabel(false);
+              const editSelect = document.getElementById("iqm_edit_question_id");
+              if (editSelect) editSelect.value = "";
               form.reset();
+              document.getElementById("iqm_section_id").value = sectionId;
+              document.getElementById("iqm_parent_id").value = "0";
               document.getElementById("iqm_trigger_container").style.display =
                 "none";
               await loadIndividualQuestionTree();
             } else {
-              showMessage(result.error || "Failed to add question", "error");
+              showMessage(result.error || "Failed to save question", "error");
             }
           } catch (error) {
             showMessage("Error: " + error.message, "error");

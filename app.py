@@ -393,380 +393,36 @@ def ensure_aadhar_storage_columns():
         print("=== ERROR ENSURING AADHAAR STORAGE COLUMNS ===")
         print(traceback.format_exc())
 
+def ensure_household_registry_table():
+    try:
+        db.session.execute(sql_text("""
+            CREATE TABLE IF NOT EXISTS household_registry (
+                registry_id INT NOT NULL AUTO_INCREMENT,
+                household_code VARCHAR(255) NOT NULL,
+                code_ci VARCHAR(255) GENERATED ALWAYS AS (LOWER(household_code)) STORED,
+                village_id INT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                PRIMARY KEY (registry_id),
+                UNIQUE KEY uk_household_registry_code_ci (code_ci),
+                INDEX idx_household_registry_village (village_id),
+                CONSTRAINT fk_household_registry_village
+                    FOREIGN KEY (village_id) REFERENCES villages(village_id)
+                    ON DELETE RESTRICT ON UPDATE CASCADE
+            ) ENGINE=InnoDB;
+        """))
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+        print("=== ERROR ENSURING HOUSEHOLD REGISTRY TABLE ===")
+        print(traceback.format_exc())
 
-# @app.route("/__init_db__", methods=["POST"])
-# def init_db():
-#     try:
-#         with app.app_context():
-#             ensure_questionnaire_tables()
-#             ensure_household_name_unique_index()
-#             ensure_aadhar_storage_columns()
-#         return "✅ Database schema created successfully", 200
-#     except Exception:
-#         return traceback.format_exc(), 500
+with app.app_context():
+    ensure_questionnaire_tables()
+    ensure_household_name_unique_index()
+    ensure_aadhar_storage_columns()
+    ensure_household_registry_table()
 
-
-# ==========================================================
-# DATABASE SCHEMA INITIALIZATION (RAILWAY ONLY)
-# ==========================================================
-# if DB_READY and os.getenv("RAILWAY_ENVIRONMENT"):
-#     # with app.app_context():
-#     #     try:
-#     #         ensure_questionnaire_tables()
-#     #         ensure_household_name_unique_index()
-#     #         ensure_aadhar_storage_columns()
-#             print("✅ Database schema ensured successfully on Railway")
-#         except Exception:
-#             print("❌ Database schema initialization failed")
-#             print(traceback.format_exc())
-# ==========================================================
-# DO NOT AUTO-RUN DATABASE MIGRATIONS ON STARTUP
-# ==========================================================
-print("🚀 App started. Database schema NOT auto-initialized.")
-
-# # ==========================================================
-# # APP + DATABASE CONFIG
-# # ==========================================================
-
-# app = Flask(__name__)
-# app.secret_key = os.environ.get("FLASK_SECRET_KEY", secrets.token_hex(16))
-
-# db = SQLAlchemy()
-
-# # Build DB URL manually from Railway MySQL vars
-# mysql_host = os.getenv("MYSQLHOST")
-# mysql_user = os.getenv("MYSQLUSER")
-# mysql_password = os.getenv("MYSQLPASSWORD")
-# mysql_db = os.getenv("MYSQLDATABASE")
-# mysql_port = os.getenv("MYSQLPORT", "3306")
-
-# if mysql_host and mysql_user and mysql_password and mysql_db:
-#     database_url = (
-#         f"mysql+pymysql://{mysql_user}:{mysql_password}"
-#         f"@{mysql_host}:{mysql_port}/{mysql_db}"
-#     )
-
-#     app.config["SQLALCHEMY_DATABASE_URI"] = database_url
-#     app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
-#     db.init_app(app)
-# if CORS:
-#     CORS(app, resources={r"/*": {"origins": "*"}}, supports_credentials=True)
-
-# def ensure_questionnaire_tables():
-#     try:
-#         def _col_exists(table_name: str, column_name: str) -> bool:
-#             row = db.session.execute(sql_text("""
-#                 SELECT COUNT(*) AS cnt
-#                 FROM information_schema.columns
-#                 WHERE table_schema = DATABASE()
-#                   AND table_name = :t
-#                   AND column_name = :c
-#             """), {"t": table_name, "c": column_name}).mappings().fetchone()
-#             return row and int(row["cnt"]) > 0
-
-#         ddl = [
-#             """
-#             CREATE TABLE IF NOT EXISTS questionnaire_sections (
-#                 section_id INT AUTO_INCREMENT NOT NULL,
-#                 section_order INT NOT NULL,
-#                 section_title VARCHAR(255) NOT NULL,
-#                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-#                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-#                 PRIMARY KEY (section_id),
-#                 UNIQUE KEY uk_section_order (section_order),
-#                 UNIQUE KEY uk_section_title (section_title),
-#                 INDEX idx_section_order (section_order)
-#             ) ENGINE=InnoDB;
-#             """,
-#             """
-#             CREATE TABLE IF NOT EXISTS questions (
-#                 question_id INT AUTO_INCREMENT NOT NULL,
-#                 question_order INT NOT NULL,
-#                 question_section_id INT DEFAULT NULL,
-#                 question_text TEXT NOT NULL,
-#                 question_type VARCHAR(50) NOT NULL,
-#                 answer_type VARCHAR(20) NOT NULL,
-#                 options TEXT NULL,
-#                 parent_id INT NULL,
-#                 trigger_value VARCHAR(255) NULL,
-#                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-#                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-#                 PRIMARY KEY (question_id),
-#                 UNIQUE KEY uk_question_order (question_order),
-#                 INDEX idx_question_order (question_order),
-#                 INDEX idx_question_section_id (question_section_id),
-#                 INDEX idx_questions_parent (parent_id),
-#                 CONSTRAINT fk_question_section
-#                     FOREIGN KEY (question_section_id)
-#                     REFERENCES questionnaire_sections(section_id)
-#                     ON DELETE CASCADE ON UPDATE CASCADE,
-#                 CONSTRAINT fk_parent_question
-#                     FOREIGN KEY (parent_id)
-#                     REFERENCES questions(question_id)
-#                     ON DELETE CASCADE,
-#                 CHECK (question_type IN ('multiple_choice', 'single_choice', 'open_ended')),
-#                 CHECK (answer_type IN ('text', 'numerical'))
-#             ) ENGINE=InnoDB;
-#             """,
-#             """
-#             CREATE TABLE IF NOT EXISTS individual_questionnaire_sections (
-#                 section_id INT AUTO_INCREMENT NOT NULL,
-#                 section_order INT NOT NULL,
-#                 section_title VARCHAR(255) NOT NULL,
-#                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-#                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-#                 PRIMARY KEY (section_id),
-#                 UNIQUE KEY uk_individual_section_order (section_order),
-#                 UNIQUE KEY uk_individual_section_title (section_title),
-#                 INDEX idx_individual_section_order (section_order)
-#             ) ENGINE=InnoDB;
-#             """,
-#             """
-#             CREATE TABLE IF NOT EXISTS individual_questions (
-#                 question_id INT AUTO_INCREMENT NOT NULL,
-#                 question_order INT NOT NULL,
-#                 question_section_id INT DEFAULT NULL,
-#                 question_text TEXT NOT NULL,
-#                 question_type VARCHAR(50) NOT NULL,
-#                 answer_type VARCHAR(20) NOT NULL,
-#                 options TEXT NULL,
-#                 parent_id INT NULL,
-#                 trigger_value VARCHAR(255) NULL,
-#                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-#                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-#                 PRIMARY KEY (question_id),
-#                 UNIQUE KEY uk_individual_question_order (question_order),
-#                 INDEX idx_individual_question_order (question_order),
-#                 INDEX idx_individual_question_section_id (question_section_id),
-#                 INDEX idx_individual_questions_parent (parent_id),
-#                 CONSTRAINT fk_individual_question_section
-#                     FOREIGN KEY (question_section_id)
-#                     REFERENCES individual_questionnaire_sections(section_id)
-#                     ON DELETE CASCADE ON UPDATE CASCADE,
-#                 CONSTRAINT fk_individual_parent_question
-#                     FOREIGN KEY (parent_id)
-#                     REFERENCES individual_questions(question_id)
-#                     ON DELETE CASCADE,
-#                 CHECK (question_type IN ('multiple_choice', 'single_choice', 'open_ended')),
-#                 CHECK (answer_type IN ('text', 'numerical'))
-#             ) ENGINE=InnoDB;
-#             """,
-#             """
-#             CREATE TABLE IF NOT EXISTS main_questionnaire_responses (
-#                 main_questionnaire_id BIGINT NOT NULL AUTO_INCREMENT,
-#                 household_id INT NOT NULL,
-#                 user_id INT NOT NULL,
-#                 responses JSON NOT NULL,
-#                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-#                 PRIMARY KEY (main_questionnaire_id),
-#                 INDEX idx_main_questionnaire_household (household_id),
-#                 INDEX idx_main_questionnaire_user (user_id),
-#                 CONSTRAINT fk_main_questionnaire_household
-#                     FOREIGN KEY (household_id) REFERENCES households(household_id)
-#                     ON DELETE CASCADE,
-#                 CONSTRAINT fk_main_questionnaire_user
-#                     FOREIGN KEY (user_id) REFERENCES users(user_id)
-#                     ON DELETE CASCADE
-#             ) ENGINE=InnoDB;
-#             """,
-#             """
-#             CREATE TABLE IF NOT EXISTS survey_contributors (
-#                 contributor_id BIGINT NOT NULL AUTO_INCREMENT,
-#                 main_questionnaire_id BIGINT NOT NULL,
-#                 user_id INT NOT NULL,
-#                 contributed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-#                 PRIMARY KEY (contributor_id),
-#                 UNIQUE KEY uk_contributor_main_user (main_questionnaire_id, user_id),
-#                 INDEX idx_contrib_main (main_questionnaire_id),
-#                 INDEX idx_contrib_user (user_id),
-#                 CONSTRAINT fk_contrib_main
-#                     FOREIGN KEY (main_questionnaire_id)
-#                     REFERENCES main_questionnaire_responses(main_questionnaire_id)
-#                     ON DELETE CASCADE,
-#                 CONSTRAINT fk_contrib_user
-#                     FOREIGN KEY (user_id) REFERENCES users(user_id)
-#                     ON DELETE CASCADE
-#             ) ENGINE=InnoDB;
-#             """,
-#             """
-#             CREATE TABLE IF NOT EXISTS individual_questionnaire_responses (
-#                 individual_questionnaire_id BIGINT NOT NULL AUTO_INCREMENT,
-#                 responses JSON NOT NULL,
-#                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-#                 PRIMARY KEY (individual_questionnaire_id)
-#             ) ENGINE=InnoDB;
-#             """,
-#             """
-#             CREATE TABLE IF NOT EXISTS main_individual_questionnaire_links (
-#                 link_id BIGINT NOT NULL AUTO_INCREMENT,
-#                 main_questionnaire_id BIGINT NOT NULL,
-#                 individual_questionnaire_id BIGINT NOT NULL,
-#                 household_id INT NOT NULL,
-#                 filled_by_user_id INT NOT NULL,
-#                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-#                 PRIMARY KEY (link_id),
-#                 INDEX idx_link_main (main_questionnaire_id),
-#                 INDEX idx_link_individual (individual_questionnaire_id),
-#                 INDEX idx_link_household (household_id),
-#                 CONSTRAINT fk_link_main
-#                     FOREIGN KEY (main_questionnaire_id)
-#                     REFERENCES main_questionnaire_responses(main_questionnaire_id)
-#                     ON DELETE CASCADE,
-#                 CONSTRAINT fk_link_individual
-#                     FOREIGN KEY (individual_questionnaire_id)
-#                     REFERENCES individual_questionnaire_responses(individual_questionnaire_id)
-#                     ON DELETE CASCADE,
-#                 CONSTRAINT fk_link_household
-#                     FOREIGN KEY (household_id) REFERENCES households(household_id)
-#                     ON DELETE CASCADE,
-#                 CONSTRAINT fk_link_user
-#                     FOREIGN KEY (filled_by_user_id) REFERENCES users(user_id)
-#                     ON DELETE CASCADE
-#             ) ENGINE=InnoDB;
-#             """
-#             ,
-#             """
-#             CREATE TABLE IF NOT EXISTS household_response_drafts (
-#                 draft_id BIGINT NOT NULL AUTO_INCREMENT,
-#                 household_id INT NOT NULL,
-#                 user_id INT NOT NULL,
-#                 response_data JSON NULL,
-#                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-#                 PRIMARY KEY (draft_id),
-#                 UNIQUE KEY uk_draft_household_user (household_id, user_id),
-#                 INDEX idx_draft_household (household_id),
-#                 INDEX idx_draft_user (user_id),
-#                 CONSTRAINT fk_draft_household
-#                     FOREIGN KEY (household_id) REFERENCES households(household_id)
-#                     ON DELETE CASCADE,
-#                 CONSTRAINT fk_draft_user
-#                     FOREIGN KEY (user_id) REFERENCES users(user_id)
-#                     ON DELETE CASCADE
-#             ) ENGINE=InnoDB;
-#             """
-#         ]
-
-#         for stmt in ddl:
-#             db.session.execute(sql_text(stmt))
-
-#         # Backfill missing columns on legacy main questionnaire table
-#         if not _col_exists("questions", "options"):
-#             db.session.execute(sql_text("ALTER TABLE questions ADD COLUMN options TEXT NULL"))
-#         if not _col_exists("questions", "parent_id"):
-#             db.session.execute(sql_text("ALTER TABLE questions ADD COLUMN parent_id INT NULL"))
-#         if not _col_exists("questions", "trigger_value"):
-#             db.session.execute(sql_text("ALTER TABLE questions ADD COLUMN trigger_value VARCHAR(255) NULL"))
-
-#         db.session.commit()
-#     except Exception:
-#         db.session.rollback()
-#         print("=== ERROR ENSURING QUESTIONNAIRE TABLES ===")
-#         print(traceback.format_exc())
-
-# def ensure_household_name_unique_index():
-#     try:
-#         def _col_exists(table_name: str, column_name: str) -> bool:
-#             row = db.session.execute(sql_text("""
-#                 SELECT COUNT(*) AS cnt
-#                 FROM information_schema.columns
-#                 WHERE table_schema = DATABASE()
-#                   AND table_name = :t
-#                   AND column_name = :c
-#             """), {"t": table_name, "c": column_name}).mappings().fetchone()
-#             return row and int(row["cnt"]) > 0
-
-#         # Skip if duplicates already exist (would break unique index creation)
-#         dup = db.session.execute(sql_text("""
-#             SELECT LOWER(name) AS n, COUNT(*) AS c
-#             FROM households
-#             GROUP BY LOWER(name)
-#             HAVING c > 1
-#             LIMIT 1
-#         """)).mappings().fetchone()
-#         if dup:
-#             print("=== WARNING: Duplicate household names found; unique index not created ===")
-#             return
-
-#         # Add normalized generated column for case-insensitive uniqueness
-#         if not _col_exists("households", "name_ci"):
-#             db.session.execute(sql_text("""
-#                 ALTER TABLE households
-#                 ADD COLUMN name_ci VARCHAR(255)
-#                 GENERATED ALWAYS AS (LOWER(name)) STORED
-#             """))
-
-#         idx = db.session.execute(sql_text("""
-#             SELECT 1 FROM information_schema.statistics
-#             WHERE table_schema = DATABASE()
-#               AND table_name = 'households'
-#               AND index_name = 'uk_households_name_ci'
-#             LIMIT 1
-#         """)).mappings().fetchone()
-#         if not idx:
-#             db.session.execute(sql_text("""
-#                 CREATE UNIQUE INDEX uk_households_name_ci ON households (name_ci)
-#             """))
-
-#         db.session.commit()
-#     except Exception:
-#         db.session.rollback()
-#         print("=== ERROR ENSURING HOUSEHOLD UNIQUE INDEX ===")
-#         print(traceback.format_exc())
-
-
-# def ensure_aadhar_storage_columns():
-#     try:
-#         def _col_exists(table_name: str, column_name: str) -> bool:
-#             row = db.session.execute(sql_text("""
-#                 SELECT COUNT(*) AS cnt
-#                 FROM information_schema.columns
-#                 WHERE table_schema = DATABASE()
-#                   AND table_name = :t
-#                   AND column_name = :c
-#             """), {"t": table_name, "c": column_name}).mappings().fetchone()
-#             return row and int(row["cnt"]) > 0
-
-#         def _idx_exists(table_name: str, index_name: str) -> bool:
-#             row = db.session.execute(sql_text("""
-#                 SELECT 1
-#                 FROM information_schema.statistics
-#                 WHERE table_schema = DATABASE()
-#                   AND table_name = :t
-#                   AND index_name = :i
-#                 LIMIT 1
-#             """), {"t": table_name, "i": index_name}).mappings().fetchone()
-#             return bool(row)
-
-#         if _col_exists("persons", "aadhar") and not _col_exists("persons", "aadhar_hash"):
-#             db.session.execute(sql_text("""
-#                 ALTER TABLE persons
-#                 ADD COLUMN aadhar_hash VARCHAR(64) NULL
-#             """))
-#         if _col_exists("persons", "aadhar_hash") and not _idx_exists("persons", "idx_persons_aadhar_hash"):
-#             db.session.execute(sql_text("""
-#                 CREATE INDEX idx_persons_aadhar_hash ON persons (aadhar_hash)
-#             """))
-
-#         if not _col_exists("individual_questionnaire_responses", "aadhar_hash"):
-#             db.session.execute(sql_text("""
-#                 ALTER TABLE individual_questionnaire_responses
-#                 ADD COLUMN aadhar_hash VARCHAR(64) NULL
-#             """))
-#         if _col_exists("individual_questionnaire_responses", "aadhar_hash") and not _idx_exists("individual_questionnaire_responses", "idx_iqr_aadhar_hash"):
-#             db.session.execute(sql_text("""
-#                 CREATE INDEX idx_iqr_aadhar_hash ON individual_questionnaire_responses (aadhar_hash)
-#             """))
-
-#         db.session.commit()
-#     except Exception:
-#         db.session.rollback()
-#         print("=== ERROR ENSURING AADHAAR STORAGE COLUMNS ===")
-#         print(traceback.format_exc())
-
-# with app.app_context():
-#     ensure_questionnaire_tables()
-#     ensure_household_name_unique_index()
-#     ensure_aadhar_storage_columns()
 
 
 # ==========================================================
@@ -1085,7 +741,19 @@ def column_is_auto_increment(table_name: str, column_name: str) -> bool:
     except Exception:
         return False
 
-
+def table_exists(table_name: str) -> bool:
+    try:
+        row = db.session.execute(sql_text("""
+            SELECT 1
+            FROM information_schema.tables
+            WHERE table_schema = DATABASE()
+              AND table_name = :t
+            LIMIT 1
+        """), {"t": table_name}).mappings().fetchone()
+        return bool(row)
+    except Exception:
+        return False
+    
 def next_id(table_name: str, column_name: str) -> int:
     row = db.session.execute(sql_text(f"""
         SELECT COALESCE(MAX({column_name}), 0) + 1 AS next_id
@@ -1137,8 +805,16 @@ def parse_bulk_rows(rows, level: str):
         "villagelgd": "lgd",
         "villagelgdcode": "lgd",
         "villagelgdcodeid": "lgd",
+        "villagelgdcode": "lgd",
         "villagelgd": "lgd",
         "village_lgd_code": "lgd",
+        "household": "household",
+        "households": "household",
+        "householdid": "household",
+        "householdcode": "household",
+        "householdname": "household",
+        "householduid": "household",
+        "hhid": "household",
     }
 
     def has_header(first_row):
@@ -1178,6 +854,7 @@ def parse_bulk_rows(rows, level: str):
         "blocks": ["state", "district", "block"],
         "subcenters": ["state", "district", "block", "subcenter"],
         "villages": ["state", "district", "block", "subcenter", "village"],
+        "households": ["state", "district", "block", "subcenter", "village", "household"],
     }
     positions = {
         "state": 0,
@@ -1186,6 +863,7 @@ def parse_bulk_rows(rows, level: str):
         "subcenter": 3,
         "village": 4,
         "lgd": 5,
+        "household": 5,
     }
 
     items = []
@@ -1195,7 +873,12 @@ def parse_bulk_rows(rows, level: str):
         if not any(cell_to_str(c) for c in row):
             continue
         item = {"_row": i + 1}
-        for key in ["state", "district", "block", "subcenter", "village", "lgd"]:
+        row_keys = ["state", "district", "block", "subcenter", "village"]
+        if level == "villages":
+            row_keys.append("lgd")
+        if level == "households":
+            row_keys.append("household")
+        for key in row_keys:
             item[key] = get_val(row, key, positions[key])
         missing = [k for k in required_by_level[level] if not item.get(k)]
         if missing:
@@ -1264,15 +947,11 @@ def normalize_question_payload(data: dict):
         parent_id = None
 
     # Initialize and normalize trigger_value
-    trigger_value = data.get("trigger_value")
-
-    if not trigger_value:
-        trigger_value = None
-    else:
-        trigger_value = str(trigger_value).strip()
+    trigger_value = data.get("trigger_value", None)
+    if isinstance(trigger_value, str):
+        trigger_value = trigger_value.strip()
         if trigger_value == "":
             trigger_value = None
-
 
     # Only choice questions should keep options
     if question_type == "open_ended":
@@ -1580,9 +1259,13 @@ def household():
             if data.get(k) in (None, ""):
                 return json_error(f"{k.replace('_', ' ').title()} is required", 400)
 
+        household_name = (data.get("household_name") or "").strip()
+        if not household_name:
+            return json_error("Household name is required", 400)
+
         existing = db.session.execute(
             sql_text("SELECT household_id FROM households WHERE LOWER(name) = LOWER(:name) LIMIT 1"),
-            {"name": data["household_name"]}
+            {"name": household_name}
         ).mappings().fetchone()
         if existing:
             household_id = existing["household_id"]
@@ -1660,11 +1343,39 @@ def household():
         if v["sub_center_id"] is not None and int(v["sub_center_id"]) != sub_center_id:
             return json_error("Village does not belong to selected Sub-Center", 400)
 
+        if table_exists("household_registry"):
+            has_registry = db.session.execute(sql_text("""
+                SELECT 1
+                FROM household_registry
+                WHERE village_id = :vid
+                LIMIT 1
+            """), {"vid": village_id}).mappings().fetchone()
+            if has_registry:
+                registry_id = safe_int(data.get("household_registry_id"))
+                if registry_id:
+                    reg = db.session.execute(sql_text("""
+                        SELECT registry_id, household_code
+                        FROM household_registry
+                        WHERE registry_id = :rid AND village_id = :vid
+                        LIMIT 1
+                    """), {"rid": registry_id, "vid": village_id}).mappings().fetchone()
+                    if not reg or (reg.get("household_code") or "").strip().lower() != household_name.lower():
+                        return json_error("Household ID does not match registry selection.", 400)
+                else:
+                    reg = db.session.execute(sql_text("""
+                        SELECT registry_id
+                        FROM household_registry
+                        WHERE code_ci = LOWER(:code) AND village_id = :vid
+                        LIMIT 1
+                    """), {"code": household_name, "vid": village_id}).mappings().fetchone()
+                    if not reg:
+                        return json_error("Household ID not found for selected village. Please select from the dropdown.", 400)
+
         insert_res = db.session.execute(sql_text("""
             INSERT INTO households (name, state_id, district_id, block_id, sub_center_id, village_id, user_id)
             VALUES (:name, :state_id, :district_id, :block_id, :sub_center_id, :village_id, :user_id)
         """), {
-            "name": data["household_name"],
+            "name": household_name,
             "state_id": state_id,
             "district_id": district_id,
             "block_id": block_id,
@@ -1699,6 +1410,7 @@ def household():
     except Exception as e:
         db.session.rollback()
         return json_error(str(e), 500)
+
 
 
 @app.route("/api/resume-household", methods=["POST"])
@@ -1785,24 +1497,11 @@ def get_questionnaire_data():
 
         result = []
         for section in sections:
-            # Fetch both main and individual questions for this section and merge them
-            question_rows_main = db.session.execute(
-                sql_text("SELECT * FROM questions WHERE question_section_id=:sid"),
+            question_rows = db.session.execute(
+                sql_text("SELECT * FROM questions WHERE question_section_id=:sid ORDER BY question_order"),
                 {"sid": section["section_id"]},
             ).mappings().all()
-
-            question_rows_individual = db.session.execute(
-                sql_text("SELECT * FROM individual_questions WHERE question_section_id=:sid"),
-                {"sid": section["section_id"]},
-            ).mappings().all()
-
-            # Merge both
-            all_questions = list(question_rows_main) + list(question_rows_individual)
-
-            # Sort after merging
-            all_questions = sorted(all_questions, key=lambda r: r.get("question_order") or 0)
-
-            questions = build_question_tree([dict(q) for q in all_questions])
+            questions = build_question_tree([dict(q) for q in question_rows])
 
             result.append({
                 "section_id": section["section_id"],
@@ -1814,6 +1513,7 @@ def get_questionnaire_data():
         return jsonify(result)
     except Exception as e:
         return json_error(str(e), 500)
+
 
 @app.route("/api/individual-questionnaire-data")
 def get_individual_questionnaire_data():
@@ -2880,9 +2580,6 @@ def admin_export_main_wide():
             "village_name",
             "village_lgd_code",
             "main_questionnaire_id",
-            "individual_questionnaire_id",
-            "member_name",
-            "member_aadhar",
             "submitted_at",
             "submitted_by",
         ] + q_headers
@@ -2901,9 +2598,6 @@ def admin_export_main_wide():
                 "village_name": r.get("village_name") or "",
                 "village_lgd_code": r.get("village_lgd_code") or "",
                 "main_questionnaire_id": r.get("main_questionnaire_id") or "",
-                "individual_questionnaire_id": r.get("individual_questionnaire_id") or "",
-                "member_name": " ".join([member.get("first_name", ""), member.get("middle_name", ""), member.get("surname", "")]).strip(),
-                "member_aadhar": member.get("aadhar") or "",
                 "submitted_at": (payload or {}).get("submitted_at") or "",
                 "submitted_by": (payload or {}).get("submitted_by_username") or "",
             }
@@ -2914,6 +2608,7 @@ def admin_export_main_wide():
         return csv_response("main_questionnaire_wide.csv", out_rows, headers)
     except Exception as e:
         return json_error(str(e), 500, traceback.format_exc())
+
 
 
 @app.route("/api/admin/households/export/individual-wide")
@@ -3643,164 +3338,162 @@ def admin_delete_sub_center(sub_center_id):
         db.session.rollback()
         return json_error(str(e), 500, traceback.format_exc())
 
-# ===================== HELPERS =====================
-
-def extract_lgd_code(data):
-    """
-    Accept LGD code from multiple possible keys
-    """
-    for key in ["village_lgd_code", "lgd", "lgd_code", "LGD", "LGD Code"]:
-        if data.get(key):
-            return safe_int(data.get(key))
-    return None
-
-
-# ===================== SINGLE VILLAGE CRUD =====================
 
 @app.route("/api/admin/village", methods=["POST"])
 @role_required("admin")
 def admin_create_village():
     try:
         data = json_body()
-
-        lgd = extract_lgd_code(data)
+        lgd = safe_int(data.get("village_lgd_code"))
         name = (data.get("name") or "").strip()
         district_id = safe_int(data.get("district_id"))
         block_id = safe_int(data.get("block_id"))
         sub_center_id = safe_int(data.get("sub_center_id"))
 
         has_sub_center = column_exists("villages", "sub_center_id")
-
         if not lgd or not name or not district_id or not block_id or (has_sub_center and not sub_center_id):
-            return json_error(
-                "village_lgd_code, name, district_id, block_id, sub_center_id are required", 400
-            )
+            return json_error("village_lgd_code, name, district_id, block_id, sub_center_id are required", 400)
 
-        existing = db.session.execute(
-            sql_text("SELECT 1 FROM villages WHERE village_lgd_code = :lgd LIMIT 1"),
-            {"lgd": lgd},
-        ).fetchone()
-
+        existing = db.session.execute(sql_text("""
+            SELECT village_lgd_code
+            FROM villages
+            WHERE village_lgd_code = :lgd
+            LIMIT 1
+        """), {"lgd": lgd}).mappings().fetchone()
         if existing:
-            return json_error("Village LGD code already exists.", 409)
+            return json_error("Village LGD code already exists. Use a unique LGD code.", 409)
 
         columns = []
         params = {
+            "lgd": lgd,
             "name": name,
             "district_id": district_id,
             "block_id": block_id,
-            "sub_center_id": sub_center_id,
-            "village_lgd_code": lgd,
+            "sub_center_id": sub_center_id
         }
 
         if column_exists("villages", "village_id") and not column_is_auto_increment("villages", "village_id"):
             columns.append("village_id")
             params["village_id"] = next_id("villages", "village_id")
 
-        if column_exists("villages", "village_lgd_code"):
-            columns.append("village_lgd_code")
-
-        columns += ["name", "district_id", "block_id"]
+        columns += ["village_lgd_code", "name", "district_id", "block_id"]
+        params["village_lgd_code"] = params.pop("lgd")
         if has_sub_center:
             columns.append("sub_center_id")
-
         cols_sql = ", ".join(columns)
         vals_sql = ", ".join(f":{c}" for c in columns)
-
-        db.session.execute(
-            sql_text(f"INSERT INTO villages ({cols_sql}) VALUES ({vals_sql})"),
-            params,
-        )
+        db.session.execute(sql_text(f"""
+            INSERT INTO villages ({cols_sql})
+            VALUES ({vals_sql})
+        """), params)
         db.session.commit()
-
         return jsonify({"success": True})
-
     except Exception as e:
         db.session.rollback()
         return json_error(str(e), 500, traceback.format_exc())
-
 
 @app.route("/api/admin/village/<int:village_lgd_code>", methods=["PUT"])
 @role_required("admin")
 def admin_update_village(village_lgd_code):
     try:
         data = json_body()
-
         name = (data.get("name") or "").strip()
         district_id = safe_int(data.get("district_id"))
         block_id = safe_int(data.get("block_id"))
         sub_center_id = safe_int(data.get("sub_center_id"))
-
         has_sub_center = column_exists("villages", "sub_center_id")
 
         if not name or not district_id or not block_id or (has_sub_center and not sub_center_id):
             return json_error("name, district_id, block_id, sub_center_id are required", 400)
 
         if has_sub_center:
-            db.session.execute(
-                sql_text("""
-                    UPDATE villages
-                    SET name = :name,
-                        district_id = :district_id,
-                        block_id = :block_id,
-                        sub_center_id = :sub_center_id
-                    WHERE village_lgd_code = :lgd
-                """),
-                {
-                    "name": name,
-                    "district_id": district_id,
-                    "block_id": block_id,
-                    "sub_center_id": sub_center_id,
-                    "lgd": village_lgd_code,
-                },
-            )
+            db.session.execute(sql_text("""
+                UPDATE villages
+                SET name = :name,
+                    district_id = :district_id,
+                    block_id = :block_id,
+                    sub_center_id = :sub_center_id
+                WHERE village_lgd_code = :lgd
+            """), {
+                "name": name,
+                "district_id": district_id,
+                "block_id": block_id,
+                "sub_center_id": sub_center_id,
+                "lgd": village_lgd_code
+            })
         else:
-            db.session.execute(
-                sql_text("""
-                    UPDATE villages
-                    SET name = :name,
-                        district_id = :district_id,
-                        block_id = :block_id
-                    WHERE village_lgd_code = :lgd
-                """),
-                {
-                    "name": name,
-                    "district_id": district_id,
-                    "block_id": block_id,
-                    "lgd": village_lgd_code,
-                },
-            )
-
+            db.session.execute(sql_text("""
+                UPDATE villages
+                SET name = :name,
+                    district_id = :district_id,
+                    block_id = :block_id
+                WHERE village_lgd_code = :lgd
+            """), {
+                "name": name,
+                "district_id": district_id,
+                "block_id": block_id,
+                "lgd": village_lgd_code
+            })
         db.session.commit()
         return jsonify({"success": True})
-
     except Exception as e:
         db.session.rollback()
         return json_error(str(e), 500, traceback.format_exc())
-
 
 @app.route("/api/admin/village/<int:village_lgd_code>", methods=["DELETE"])
 @role_required("admin")
 def admin_delete_village(village_lgd_code):
     try:
-        db.session.execute(
-            sql_text("DELETE FROM villages WHERE village_lgd_code = :lgd"),
-            {"lgd": village_lgd_code},
-        )
+        db.session.execute(sql_text("DELETE FROM villages WHERE village_lgd_code = :lgd"), {"lgd": village_lgd_code})
         db.session.commit()
         return jsonify({"success": True})
-
     except Exception as e:
         db.session.rollback()
         return json_error(str(e), 500, traceback.format_exc())
 
-# ===================== BULK LOCATION UPLOAD =====================
+
+@app.route("/api/admin/household-registry", methods=["POST"])
+@role_required("admin")
+def admin_create_household_registry():
+    try:
+        data = json_body()
+        code = (data.get("household_code") or data.get("name") or "").strip()
+        village_id = safe_int(data.get("village_id"))
+
+        if not code or not village_id:
+            return json_error("household_code and village_id are required", 400)
+
+        village = db.session.execute(
+            sql_text("SELECT village_id FROM villages WHERE village_id = :vid"),
+            {"vid": village_id},
+        ).mappings().fetchone()
+        if not village:
+            return json_error("Village not found", 400)
+
+        exists = db.session.execute(sql_text("""
+            SELECT registry_id
+            FROM household_registry
+            WHERE code_ci = LOWER(:code)
+            LIMIT 1
+        """), {"code": code}).mappings().fetchone()
+        if exists:
+            return json_error("Household ID already exists", 409)
+
+        db.session.execute(sql_text("""
+            INSERT INTO household_registry (household_code, village_id)
+            VALUES (:code, :vid)
+        """), {"code": code, "vid": village_id})
+        db.session.commit()
+        return jsonify({"success": True})
+    except Exception as e:
+        db.session.rollback()
+        return json_error(str(e), 500, traceback.format_exc())
 
 @app.route("/api/admin/locations/bulk/<level>", methods=["POST"])
 @role_required("admin")
 def admin_bulk_locations(level):
     if not load_workbook:
-        return json_error("openpyxl is required for bulk upload.", 500)
+        return json_error("openpyxl is required for bulk upload. Please install it on the server.", 500)
 
     level_map = {
         "state": "states",
@@ -3815,11 +3508,14 @@ def admin_bulk_locations(level):
         "subcentres": "subcenters",
         "village": "villages",
         "villages": "villages",
+        "household": "households",
+        "households": "households",
     }
-
     level = level_map.get((level or "").strip().lower())
     if not level:
         return json_error("Invalid level", 400)
+    if level == "households" and not table_exists("household_registry"):
+        return json_error("household_registry table not found. Contact admin.", 500)
 
     file = request.files.get("file")
     if not file:
@@ -3833,702 +3529,250 @@ def admin_bulk_locations(level):
     if not rows:
         return json_error("No data found in file", 400)
 
+    items, parse_errors = parse_bulk_rows(rows, level)
+    if not items and parse_errors:
+        return json_error("No valid rows found", 400, {"errors": parse_errors[:20]})
+
     inserted = 0
     skipped = 0
     errors = []
-    parse_errors = []
 
-    # ---------- FIXED COLUMN MAPPING (NO HEADERS) ----------
-    items = []
-    for idx, row in enumerate(rows, start=1):
-        try:
-            if len(row) < 5:
-                raise ValueError("Row must have at least 5 columns")
-
-            item = {
-                "_row": idx,
-                "state": (row[0] or "").strip(),
-                "district": (row[1] or "").strip(),
-                "block": (row[2] or "").strip(),
-                "subcenter": (row[3] or "").strip(),
-                "village": (row[4] or "").strip(),
-                "lgd": safe_int(row[5]) if len(row) > 5 else None,
-            }
-
-            if not item["state"] or not item["district"] or not item["block"] or not item["village"]:
-                raise ValueError("State, District, Block, Village cannot be empty")
-
-            items.append(item)
-
-        except Exception as e:
-            parse_errors.append(f"Row {idx}: {str(e)}")
-
-    if not items:
-        return json_error("No valid rows found", 400, {"errors": parse_errors[:20]})
-
-    # ---------- HELPERS (UNCHANGED LOGIC STYLE) ----------
-
-    def get_state_id(name):
+    def get_state_id(name: str):
         row = db.session.execute(
-            sql_text("SELECT state_id FROM states WHERE LOWER(name)=LOWER(:n) LIMIT 1"),
+            sql_text("SELECT state_id FROM states WHERE LOWER(name) = LOWER(:n) LIMIT 1"),
             {"n": name},
-        ).fetchone()
+        ).mappings().fetchone()
         if row:
-            return row[0], False
+            return row["state_id"], False
 
-        res = db.session.execute(
-            sql_text("INSERT INTO states (name) VALUES (:n)"),
-            {"n": name},
-        )
-        return res.lastrowid, True
+        columns = []
+        params = {}
+        if column_exists("states", "state_id") and not column_is_auto_increment("states", "state_id"):
+            columns.append("state_id")
+            params["state_id"] = next_id("states", "state_id")
 
-    def get_district_id(state_id, name):
+        columns.append("name")
+        params["name"] = name
+
+        if column_exists("states", "territory_type"):
+            columns.append("territory_type")
+            params["territory_type"] = "STATE"
+
+        cols_sql = ", ".join(columns)
+        vals_sql = ", ".join(f":{c}" for c in columns)
+        res = db.session.execute(sql_text(f"""
+            INSERT INTO states ({cols_sql})
+            VALUES ({vals_sql})
+        """), params)
+        new_id = res.lastrowid or params.get("state_id")
+        return new_id, True
+
+    def get_district_id(state_id: int, name: str):
         row = db.session.execute(
-            sql_text("""
-                SELECT district_id FROM districts
-                WHERE LOWER(name)=LOWER(:n) AND state_id=:sid LIMIT 1
-            """),
+            sql_text("SELECT district_id FROM districts WHERE LOWER(name) = LOWER(:n) AND state_id = :sid LIMIT 1"),
             {"n": name, "sid": state_id},
-        ).fetchone()
+        ).mappings().fetchone()
         if row:
-            return row[0], False
+            return row["district_id"], False
 
-        res = db.session.execute(
-            sql_text("""
-                INSERT INTO districts (name, state_id)
-                VALUES (:n, :sid)
-            """),
-            {"n": name, "sid": state_id},
-        )
-        return res.lastrowid, True
+        columns = []
+        params = {"name": name, "state_id": state_id}
+        if column_exists("districts", "district_id") and not column_is_auto_increment("districts", "district_id"):
+            columns.append("district_id")
+            params["district_id"] = next_id("districts", "district_id")
 
-    def get_block_id(district_id, name):
+        columns += ["name", "state_id"]
+        cols_sql = ", ".join(columns)
+        vals_sql = ", ".join(f":{c}" for c in columns)
+        res = db.session.execute(sql_text(f"""
+            INSERT INTO districts ({cols_sql})
+            VALUES ({vals_sql})
+        """), params)
+        new_id = res.lastrowid or params.get("district_id")
+        return new_id, True
+
+    def get_block_id(district_id: int, name: str):
         row = db.session.execute(
-            sql_text("""
-                SELECT block_id FROM blocks
-                WHERE LOWER(name)=LOWER(:n) AND district_id=:did LIMIT 1
-            """),
+            sql_text("SELECT block_id FROM blocks WHERE LOWER(name) = LOWER(:n) AND district_id = :did LIMIT 1"),
             {"n": name, "did": district_id},
-        ).fetchone()
+        ).mappings().fetchone()
         if row:
-            return row[0], False
+            return row["block_id"], False
 
-        res = db.session.execute(
-            sql_text("""
-                INSERT INTO blocks (name, district_id)
-                VALUES (:n, :did)
-            """),
-            {"n": name, "did": district_id},
-        )
-        return res.lastrowid, True
+        columns = []
+        params = {"name": name, "district_id": district_id}
+        if column_exists("blocks", "block_id") and not column_is_auto_increment("blocks", "block_id"):
+            columns.append("block_id")
+            params["block_id"] = next_id("blocks", "block_id")
 
-    def get_subcenter_id(block_id, name):
+        columns += ["name", "district_id"]
+        cols_sql = ", ".join(columns)
+        vals_sql = ", ".join(f":{c}" for c in columns)
+        res = db.session.execute(sql_text(f"""
+            INSERT INTO blocks ({cols_sql})
+            VALUES ({vals_sql})
+        """), params)
+        new_id = res.lastrowid or params.get("block_id")
+        return new_id, True
+
+    def get_subcenter_id(block_id: int, name: str):
         row = db.session.execute(
-            sql_text("""
-                SELECT sub_center_id FROM sub_centers
-                WHERE LOWER(name)=LOWER(:n) AND block_id=:bid LIMIT 1
-            """),
+            sql_text("SELECT sub_center_id FROM sub_centers WHERE LOWER(name) = LOWER(:n) AND block_id = :bid LIMIT 1"),
             {"n": name, "bid": block_id},
-        ).fetchone()
+        ).mappings().fetchone()
         if row:
-            return row[0], False
+            return row["sub_center_id"], False
 
-        res = db.session.execute(
-            sql_text("""
-                INSERT INTO sub_centers (name, block_id)
-                VALUES (:n, :bid)
-            """),
-            {"n": name, "bid": block_id},
-        )
-        return res.lastrowid, True
+        columns = []
+        params = {"name": name, "block_id": block_id}
+        if column_exists("sub_centers", "sub_center_id") and not column_is_auto_increment("sub_centers", "sub_center_id"):
+            columns.append("sub_center_id")
+            params["sub_center_id"] = next_id("sub_centers", "sub_center_id")
 
-    def get_village_id(name, district_id, block_id, sub_center_id, lgd_code):
+        columns += ["name", "block_id"]
+        cols_sql = ", ".join(columns)
+        vals_sql = ", ".join(f":{c}" for c in columns)
+        res = db.session.execute(sql_text(f"""
+            INSERT INTO sub_centers ({cols_sql})
+            VALUES ({vals_sql})
+        """), params)
+        new_id = res.lastrowid or params.get("sub_center_id")
+        return new_id, True
+
+    def get_village_id(name: str, district_id: int, block_id: int, sub_center_id: int, lgd_code):
         has_sub_center = column_exists("villages", "sub_center_id")
-
-        where = "LOWER(name)=LOWER(:n) AND district_id=:did AND block_id=:bid"
         params = {"n": name, "did": district_id, "bid": block_id}
-
+        where = "LOWER(name) = LOWER(:n) AND district_id = :did AND block_id = :bid"
         if has_sub_center:
-            where += " AND sub_center_id=:sid"
+            where += " AND sub_center_id = :sid"
             params["sid"] = sub_center_id
 
         row = db.session.execute(
-            sql_text(f"SELECT village_id FROM villages WHERE {where} LIMIT 1"),
+            sql_text(f"SELECT village_id, village_lgd_code FROM villages WHERE {where} LIMIT 1"),
             params,
-        ).fetchone()
+        ).mappings().fetchone()
         if row:
-            return row[0], False
+            return row["village_id"], False
 
         if lgd_code and column_exists("villages", "village_lgd_code"):
-            row = db.session.execute(
-                sql_text("SELECT village_id FROM villages WHERE village_lgd_code=:lgd"),
+            lgd_row = db.session.execute(
+                sql_text("SELECT village_id FROM villages WHERE village_lgd_code = :lgd LIMIT 1"),
                 {"lgd": lgd_code},
-            ).fetchone()
-            if row:
-                return row[0], False
+            ).mappings().fetchone()
+            if lgd_row:
+                return lgd_row["village_id"], False
 
-        cols = ["name", "district_id", "block_id"]
-        vals = {
-            "name": name,
-            "district_id": district_id,
-            "block_id": block_id,
-        }
+        if not lgd_code and column_exists("villages", "village_lgd_code"):
+            lgd_code = next_id("villages", "village_lgd_code")
 
+        columns = []
+        params = {"name": name, "district_id": district_id, "block_id": block_id}
         if has_sub_center:
-            cols.append("sub_center_id")
-            vals["sub_center_id"] = sub_center_id
+            params["sub_center_id"] = sub_center_id
+
+        if column_exists("villages", "village_id") and not column_is_auto_increment("villages", "village_id"):
+            columns.append("village_id")
+            params["village_id"] = next_id("villages", "village_id")
 
         if column_exists("villages", "village_lgd_code"):
-            cols.append("village_lgd_code")
-            vals["village_lgd_code"] = lgd_code
+            columns.append("village_lgd_code")
+            params["village_lgd_code"] = lgd_code
 
-        res = db.session.execute(
-            sql_text(f"""
-                INSERT INTO villages ({", ".join(cols)})
-                VALUES ({", ".join(":"+c for c in cols)})
-            """),
-            vals,
-        )
-        return res.lastrowid, True
+        columns += ["name", "district_id", "block_id"]
+        if has_sub_center:
+            columns.append("sub_center_id")
 
-    # ---------- MAIN PROCESSING LOOP ----------
+        cols_sql = ", ".join(columns)
+        vals_sql = ", ".join(f":{c}" for c in columns)
+        res = db.session.execute(sql_text(f"""
+            INSERT INTO villages ({cols_sql})
+            VALUES ({vals_sql})
+        """), params)
+        new_id = res.lastrowid or params.get("village_id")
+        return new_id, True
 
     for item in items:
         try:
             with db.session.begin_nested():
-                state_id, _ = get_state_id(item["state"])
-                district_id, _ = get_district_id(state_id, item["district"])
-                block_id, _ = get_block_id(district_id, item["block"])
-                sub_center_id, _ = get_subcenter_id(block_id, item["subcenter"])
+                state_id, created = get_state_id(item["state"])
 
+                if level == "states":
+                    if created:
+                        inserted += 1
+                    else:
+                        skipped += 1
+                    continue
+
+                district_id, created = get_district_id(state_id, item["district"])
+                if level == "districts":
+                    if created:
+                        inserted += 1
+                    else:
+                        skipped += 1
+                    continue
+
+                block_id, created = get_block_id(district_id, item["block"])
+                if level == "blocks":
+                    if created:
+                        inserted += 1
+                    else:
+                        skipped += 1
+                    continue
+
+                sub_center_id, created = get_subcenter_id(block_id, item["subcenter"])
+                if level == "subcenters":
+                    if created:
+                        inserted += 1
+                    else:
+                        skipped += 1
+                    continue
+
+                lgd_code = safe_int(item.get("lgd"))
                 village_id, created = get_village_id(
-                    item["village"],
-                    district_id,
-                    block_id,
-                    sub_center_id,
-                    item["lgd"],
+                    item["village"], district_id, block_id, sub_center_id, lgd_code
                 )
+                if level == "villages":
+                    if created:
+                        inserted += 1
+                    else:
+                        skipped += 1
+                    continue
 
-                if created:
-                    inserted += 1
-                else:
-                    skipped += 1
+                if level == "households":
+                    code = (item.get("household") or "").strip()
+                    if not code:
+                        errors.append(f"Row {item.get('_row')}: missing household")
+                        continue
 
+                    existing_household = db.session.execute(sql_text("""
+                        SELECT registry_id
+                        FROM household_registry
+                        WHERE code_ci = LOWER(:code)
+                        LIMIT 1
+                    """), {"code": code}).mappings().fetchone()
+
+                    if existing_household:
+                        skipped += 1
+                    else:
+                        db.session.execute(sql_text("""
+                            INSERT INTO household_registry (household_code, village_id)
+                            VALUES (:code, :vid)
+                        """), {"code": code, "vid": village_id})
+                        inserted += 1
         except Exception as e:
-            errors.append(f"Row {item['_row']}: {str(e)}")
+            errors.append(f"Row {item.get('_row')}: {str(e)}")
 
     db.session.commit()
-
-    return jsonify({
-        "success": True,
-        "inserted": inserted,
-        "skipped": skipped,
-        "errors": errors[:20],
-        "parse_errors": parse_errors[:20],
-    })
-
-# # ===================== BULK LOCATION UPLOAD =====================
-
-# @app.route("/api/admin/locations/bulk/<level>", methods=["POST"])
-# @role_required("admin")
-# def admin_bulk_locations(level):
-#     if not load_workbook:
-#         return json_error("openpyxl is required for bulk upload.", 500)
-
-#     level_map = {
-#         "state": "states",
-#         "states": "states",
-#         "district": "districts",
-#         "districts": "districts",
-#         "block": "blocks",
-#         "blocks": "blocks",
-#         "subcenter": "subcenters",
-#         "subcentre": "subcenters",
-#         "subcenters": "subcenters",
-#         "subcentres": "subcenters",
-#         "village": "villages",
-#         "villages": "villages",
-#     }
-
-#     level = level_map.get((level or "").strip().lower())
-#     if not level:
-#         return json_error("Invalid level", 400)
-
-#     file = request.files.get("file")
-#     if not file:
-#         return json_error("file is required", 400)
-
-#     try:
-#         rows = read_excel_rows(file)
-#     except Exception as e:
-#         return json_error(f"Failed to read Excel: {str(e)}", 400)
-
-#     if not rows:
-#         return json_error("No data found in file", 400)
-
-#     items, parse_errors = parse_bulk_rows(rows, level)
-#     if not items and parse_errors:
-#         return json_error("No valid rows found", 400, {"errors": parse_errors[:20]})
-
-#     inserted = 0
-#     skipped = 0
-#     errors = []
-
-#     # ---- helper functions (state / district / block / subcenter unchanged) ----
-#     # [UNCHANGED — your existing functions stay exactly the same]
-
-#     # ---- village handling ----
-
-#     def get_village_id(name, district_id, block_id, sub_center_id, lgd_code):
-#         has_sub_center = column_exists("villages", "sub_center_id")
-
-#         params = {"n": name, "did": district_id, "bid": block_id}
-#         where = "LOWER(name) = LOWER(:n) AND district_id = :did AND block_id = :bid"
-
-#         if has_sub_center:
-#             where += " AND sub_center_id = :sid"
-#             params["sid"] = sub_center_id
-
-#         row = db.session.execute(
-#             sql_text(f"SELECT village_id FROM villages WHERE {where} LIMIT 1"),
-#             params,
-#         ).fetchone()
-
-#         if row:
-#             return row[0], False
-
-#         if lgd_code and column_exists("villages", "village_lgd_code"):
-#             lgd_row = db.session.execute(
-#                 sql_text("SELECT village_id FROM villages WHERE village_lgd_code = :lgd"),
-#                 {"lgd": lgd_code},
-#             ).fetchone()
-#             if lgd_row:
-#                 return lgd_row[0], False
-
-#         if not lgd_code and column_exists("villages", "village_lgd_code"):
-#             lgd_code = next_id("villages", "village_lgd_code")
-
-#         columns = ["name", "district_id", "block_id"]
-#         params = {
-#             "name": name,
-#             "district_id": district_id,
-#             "block_id": block_id,
-#             "village_lgd_code": lgd_code,
-#         }
-
-#         if has_sub_center:
-#             columns.append("sub_center_id")
-#             params["sub_center_id"] = sub_center_id
-
-#         if column_exists("villages", "village_lgd_code"):
-#             columns.append("village_lgd_code")
-
-#         cols_sql = ", ".join(columns)
-#         vals_sql = ", ".join(f":{c}" for c in columns)
-
-#         res = db.session.execute(
-#             sql_text(f"INSERT INTO villages ({cols_sql}) VALUES ({vals_sql})"),
-#             params,
-#         )
-
-#         return res.lastrowid, True
-
-#     # ---- processing loop ----
-
-#     for item in items:
-#         try:
-#             with db.session.begin_nested():
-#                 # existing logic unchanged
-#                 lgd_code = extract_lgd_code(item)
-#                 # rest stays same
-#         except Exception as e:
-#             errors.append(f"Row {item.get('_row')}: {str(e)}")
-
-#     db.session.commit()
-
-#     return jsonify({
-#         "success": True,
-#         "inserted": inserted,
-#         "skipped": skipped,
-#         "errors": errors[:20],
-#         "parse_errors": parse_errors[:20],
-#     })
-
-# @app.route("/api/admin/village", methods=["POST"])
-# @role_required("admin")
-# def admin_create_village():
-#     try:
-#         data = json_body()
-#         lgd = safe_int(data.get("village_lgd_code"))
-#         name = (data.get("name") or "").strip()
-#         district_id = safe_int(data.get("district_id"))
-#         block_id = safe_int(data.get("block_id"))
-#         sub_center_id = safe_int(data.get("sub_center_id"))
-
-#         has_sub_center = column_exists("villages", "sub_center_id")
-#         if not lgd or not name or not district_id or not block_id or (has_sub_center and not sub_center_id):
-#             return json_error("village_lgd_code, name, district_id, block_id, sub_center_id are required", 400)
-
-#         existing = db.session.execute(sql_text("""
-#             SELECT village_lgd_code
-#             FROM villages
-#             WHERE village_lgd_code = :lgd
-#             LIMIT 1
-#         """), {"lgd": lgd}).mappings().fetchone()
-#         if existing:
-#             return json_error("Village LGD code already exists. Use a unique LGD code.", 409)
-
-#         columns = []
-#         params = {
-#             "lgd": lgd,
-#             "name": name,
-#             "district_id": district_id,
-#             "block_id": block_id,
-#             "sub_center_id": sub_center_id
-#         }
-
-#         if column_exists("villages", "village_id") and not column_is_auto_increment("villages", "village_id"):
-#             columns.append("village_id")
-#             params["village_id"] = next_id("villages", "village_id")
-
-#         if column_exists("villages", "village_lgd_code"):
-#             columns.append("village_lgd_code")
-#             params["village_lgd_code"] = lgd_code
-
-#         columns += ["name", "district_id", "block_id"]
-#         if has_sub_center:
-#             columns.append("sub_center_id")
-
-#         cols_sql = ", ".join(columns)
-#         vals_sql = ", ".join(f":{c}" for c in columns)
-#         db.session.execute(sql_text(f"""
-#             INSERT INTO villages ({cols_sql})
-#             VALUES ({vals_sql})
-#         """), params)
-#         db.session.commit()
-#         return jsonify({"success": True})
-#     except Exception as e:
-#         db.session.rollback()
-#         return json_error(str(e), 500, traceback.format_exc())
-
-
-# @app.route("/api/admin/village/<int:village_lgd_code>", methods=["PUT"])
-# @role_required("admin")
-# def admin_update_village(village_lgd_code):
-#     try:
-#         data = json_body()
-#         name = (data.get("name") or "").strip()
-#         district_id = safe_int(data.get("district_id"))
-#         block_id = safe_int(data.get("block_id"))
-#         sub_center_id = safe_int(data.get("sub_center_id"))
-#         has_sub_center = column_exists("villages", "sub_center_id")
-
-#         if not name or not district_id or not block_id or (has_sub_center and not sub_center_id):
-#             return json_error("name, district_id, block_id, sub_center_id are required", 400)
-
-#         if has_sub_center:
-#             db.session.execute(sql_text("""
-#                 UPDATE villages
-#                 SET name = :name,
-#                     district_id = :district_id,
-#                     block_id = :block_id,
-#                     sub_center_id = :sub_center_id
-#                 WHERE village_lgd_code = :lgd
-#             """), {
-#                 "name": name,
-#                 "district_id": district_id,
-#                 "block_id": block_id,
-#                 "sub_center_id": sub_center_id,
-#                 "lgd": village_lgd_code
-#             })
-#         else:
-#             db.session.execute(sql_text("""
-#                 UPDATE villages
-#                 SET name = :name,
-#                     district_id = :district_id,
-#                     block_id = :block_id
-#                 WHERE village_lgd_code = :lgd
-#             """), {
-#                 "name": name,
-#                 "district_id": district_id,
-#                 "block_id": block_id,
-#                 "lgd": village_lgd_code
-#             })
-#         db.session.commit()
-#         return jsonify({"success": True})
-#     except Exception as e:
-#         db.session.rollback()
-#         return json_error(str(e), 500, traceback.format_exc())
-
-
-# @app.route("/api/admin/village/<int:village_lgd_code>", methods=["DELETE"])
-# @role_required("admin")
-# def admin_delete_village(village_lgd_code):
-#     try:
-#         db.session.execute(sql_text("DELETE FROM villages WHERE village_lgd_code = :lgd"), {"lgd": village_lgd_code})
-#         db.session.commit()
-#         return jsonify({"success": True})
-#     except Exception as e:
-#         db.session.rollback()
-#         return json_error(str(e), 500, traceback.format_exc())
-
-
-# @app.route("/api/admin/locations/bulk/<level>", methods=["POST"])
-# @role_required("admin")
-# def admin_bulk_locations(level):
-#     if not load_workbook:
-#         return json_error("openpyxl is required for bulk upload. Please install it on the server.", 500)
-
-#     level_map = {
-#         "state": "states",
-#         "states": "states",
-#         "district": "districts",
-#         "districts": "districts",
-#         "block": "blocks",
-#         "blocks": "blocks",
-#         "subcenter": "subcenters",
-#         "subcentre": "subcenters",
-#         "subcenters": "subcenters",
-#         "subcentres": "subcenters",
-#         "village": "villages",
-#         "villages": "villages",
-#     }
-#     level = level_map.get((level or "").strip().lower())
-#     if not level:
-#         return json_error("Invalid level", 400)
-
-#     file = request.files.get("file")
-#     if not file:
-#         return json_error("file is required", 400)
-
-#     try:
-#         rows = read_excel_rows(file)
-#     except Exception as e:
-#         return json_error(f"Failed to read Excel: {str(e)}", 400)
-
-#     if not rows:
-#         return json_error("No data found in file", 400)
-
-#     items, parse_errors = parse_bulk_rows(rows, level)
-#     if not items and parse_errors:
-#         return json_error("No valid rows found", 400, {"errors": parse_errors[:20]})
-
-#     inserted = 0
-#     skipped = 0
-#     errors = []
-
-#     def get_state_id(name: str):
-#         row = db.session.execute(
-#             sql_text("SELECT state_id FROM states WHERE LOWER(name) = LOWER(:n) LIMIT 1"),
-#             {"n": name},
-#         ).mappings().fetchone()
-#         if row:
-#             return row["state_id"], False
-
-#         columns = []
-#         params = {}
-#         if column_exists("states", "state_id") and not column_is_auto_increment("states", "state_id"):
-#             columns.append("state_id")
-#             params["state_id"] = next_id("states", "state_id")
-
-#         columns.append("name")
-#         params["name"] = name
-
-#         if column_exists("states", "territory_type"):
-#             columns.append("territory_type")
-#             params["territory_type"] = "STATE"
-
-#         cols_sql = ", ".join(columns)
-#         vals_sql = ", ".join(f":{c}" for c in columns)
-#         res = db.session.execute(sql_text(f"""
-#             INSERT INTO states ({cols_sql})
-#             VALUES ({vals_sql})
-#         """), params)
-#         new_id = res.lastrowid or params.get("state_id")
-#         return new_id, True
-
-#     def get_district_id(state_id: int, name: str):
-#         row = db.session.execute(
-#             sql_text("SELECT district_id FROM districts WHERE LOWER(name) = LOWER(:n) AND state_id = :sid LIMIT 1"),
-#             {"n": name, "sid": state_id},
-#         ).mappings().fetchone()
-#         if row:
-#             return row["district_id"], False
-
-#         columns = []
-#         params = {"name": name, "state_id": state_id}
-#         if column_exists("districts", "district_id") and not column_is_auto_increment("districts", "district_id"):
-#             columns.append("district_id")
-#             params["district_id"] = next_id("districts", "district_id")
-
-#         columns += ["name", "state_id"]
-#         cols_sql = ", ".join(columns)
-#         vals_sql = ", ".join(f":{c}" for c in columns)
-#         res = db.session.execute(sql_text(f"""
-#             INSERT INTO districts ({cols_sql})
-#             VALUES ({vals_sql})
-#         """), params)
-#         new_id = res.lastrowid or params.get("district_id")
-#         return new_id, True
-
-#     def get_block_id(district_id: int, name: str):
-#         row = db.session.execute(
-#             sql_text("SELECT block_id FROM blocks WHERE LOWER(name) = LOWER(:n) AND district_id = :did LIMIT 1"),
-#             {"n": name, "did": district_id},
-#         ).mappings().fetchone()
-#         if row:
-#             return row["block_id"], False
-
-#         columns = []
-#         params = {"name": name, "district_id": district_id}
-#         if column_exists("blocks", "block_id") and not column_is_auto_increment("blocks", "block_id"):
-#             columns.append("block_id")
-#             params["block_id"] = next_id("blocks", "block_id")
-
-#         columns += ["name", "district_id"]
-#         cols_sql = ", ".join(columns)
-#         vals_sql = ", ".join(f":{c}" for c in columns)
-#         res = db.session.execute(sql_text(f"""
-#             INSERT INTO blocks ({cols_sql})
-#             VALUES ({vals_sql})
-#         """), params)
-#         new_id = res.lastrowid or params.get("block_id")
-#         return new_id, True
-
-#     def get_subcenter_id(block_id: int, name: str):
-#         row = db.session.execute(
-#             sql_text("SELECT sub_center_id FROM sub_centers WHERE LOWER(name) = LOWER(:n) AND block_id = :bid LIMIT 1"),
-#             {"n": name, "bid": block_id},
-#         ).mappings().fetchone()
-#         if row:
-#             return row["sub_center_id"], False
-
-#         columns = []
-#         params = {"name": name, "block_id": block_id}
-#         if column_exists("sub_centers", "sub_center_id") and not column_is_auto_increment("sub_centers", "sub_center_id"):
-#             columns.append("sub_center_id")
-#             params["sub_center_id"] = next_id("sub_centers", "sub_center_id")
-
-#         columns += ["name", "block_id"]
-#         cols_sql = ", ".join(columns)
-#         vals_sql = ", ".join(f":{c}" for c in columns)
-#         res = db.session.execute(sql_text(f"""
-#             INSERT INTO sub_centers ({cols_sql})
-#             VALUES ({vals_sql})
-#         """), params)
-#         new_id = res.lastrowid or params.get("sub_center_id")
-#         return new_id, True
-
-#     def get_village_id(name: str, district_id: int, block_id: int, sub_center_id: int, lgd_code):
-#         has_sub_center = column_exists("villages", "sub_center_id")
-#         params = {"n": name, "did": district_id, "bid": block_id}
-#         where = "LOWER(name) = LOWER(:n) AND district_id = :did AND block_id = :bid"
-#         if has_sub_center:
-#             where += " AND sub_center_id = :sid"
-#             params["sid"] = sub_center_id
-
-#         row = db.session.execute(
-#             sql_text(f"SELECT village_id, village_lgd_code FROM villages WHERE {where} LIMIT 1"),
-#             params,
-#         ).mappings().fetchone()
-#         if row:
-#             return row["village_id"], False
-
-#         if lgd_code and column_exists("villages", "village_lgd_code"):
-#             lgd_row = db.session.execute(
-#                 sql_text("SELECT village_id FROM villages WHERE village_lgd_code = :lgd LIMIT 1"),
-#                 {"lgd": lgd_code},
-#             ).mappings().fetchone()
-#             if lgd_row:
-#                 return lgd_row["village_id"], False
-
-#         if not lgd_code and column_exists("villages", "village_lgd_code"):
-#             lgd_code = next_id("villages", "village_lgd_code")
-
-#         columns = []
-#         params = {"name": name, "district_id": district_id, "block_id": block_id}
-#         if has_sub_center:
-#             params["sub_center_id"] = sub_center_id
-
-#         if column_exists("villages", "village_id") and not column_is_auto_increment("villages", "village_id"):
-#             columns.append("village_id")
-#             params["village_id"] = next_id("villages", "village_id")
-
-#         if column_exists("villages", "village_lgd_code"):
-#             columns.append("village_lgd_code")
-#             params["village_lgd_code"] = lgd_code
-
-#         columns += ["name", "district_id", "block_id"]
-#         if has_sub_center:
-#             columns.append("sub_center_id")
-
-#         cols_sql = ", ".join(columns)
-#         vals_sql = ", ".join(f":{c}" for c in columns)
-#         res = db.session.execute(sql_text(f"""
-#             INSERT INTO villages ({cols_sql})
-#             VALUES ({vals_sql})
-#         """), params)
-#         new_id = res.lastrowid or params.get("village_id")
-#         return new_id, True
-
-#     for item in items:
-#         try:
-#             with db.session.begin_nested():
-#                 state_id, created = get_state_id(item["state"])
-
-#                 if level == "states":
-#                     if created:
-#                         inserted += 1
-#                     else:
-#                         skipped += 1
-#                     continue
-
-#                 district_id, created = get_district_id(state_id, item["district"])
-#                 if level == "districts":
-#                     if created:
-#                         inserted += 1
-#                     else:
-#                         skipped += 1
-#                     continue
-
-#                 block_id, created = get_block_id(district_id, item["block"])
-#                 if level == "blocks":
-#                     if created:
-#                         inserted += 1
-#                     else:
-#                         skipped += 1
-#                     continue
-
-#                 sub_center_id, created = get_subcenter_id(block_id, item["subcenter"])
-#                 if level == "subcenters":
-#                     if created:
-#                         inserted += 1
-#                     else:
-#                         skipped += 1
-#                     continue
-
-#                 lgd_code = safe_int(item.get("lgd"))
-#                 village_id, created = get_village_id(
-#                     item["village"], district_id, block_id, sub_center_id, lgd_code
-#                 )
-#                 if created:
-#                     inserted += 1
-#                 else:
-#                     skipped += 1
-#         except Exception as e:
-#             errors.append(f"Row {item.get('_row')}: {str(e)}")
-
-#     db.session.commit()
-#     if errors:
-#         return jsonify({
-#             "success": True,
-#             "inserted": inserted,
-#             "skipped": skipped,
-#             "errors": errors[:20],
-#             "parse_errors": parse_errors[:20]
-#         }), 200
-
-#     return jsonify({"success": True, "inserted": inserted, "skipped": skipped, "parse_errors": parse_errors[:20]})
+    if errors:
+        return jsonify({
+            "success": True,
+            "inserted": inserted,
+            "skipped": skipped,
+            "errors": errors[:20],
+            "parse_errors": parse_errors[:20]
+        }), 200
+
+    return jsonify({"success": True, "inserted": inserted, "skipped": skipped, "parse_errors": parse_errors[:20]})
 
 # ==========================================================
 # ADMIN APIs (WRITE) - QUESTIONS  ✅ FIXED
@@ -4715,7 +3959,6 @@ def admin_delete_individual_question(question_id):
         db.session.rollback()
         return json_error(str(e), 500, traceback.format_exc())
 
-
 # ==========================================================
 # QUESTION TREE (used by questionnaire_manager.html)
 # ==========================================================
@@ -4753,7 +3996,6 @@ def get_questions_tree(section_id):
         return jsonify(build_tree())
     except Exception as e:
         return json_error(str(e), 500, traceback.format_exc())
-
 
 # ==========================================================
 # ADMIN USER/ADMIN MGMT
@@ -5136,17 +4378,5 @@ def initialize_survey():
 # ==========================================================
 # RUN
 # ==========================================================
-
-# @app.route("/__init_db__", methods=["POST"])
-# def init_db():
-#     try:
-#         with app.app_context():
-#             ensure_questionnaire_tables()
-#             ensure_household_name_unique_index()
-#             ensure_aadhar_storage_columns()
-#         return "✅ Database schema created successfully", 200
-#     except Exception:
-#         return traceback.format_exc(), 500
-
 if __name__ == "__main__":
     app.run(debug=True)
