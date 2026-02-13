@@ -30,7 +30,7 @@ async function loadQuestionnaireData() {
     try {
         showMessage('Loading questionnaire...', 'info');
         
-        const response = await fetch('/api/questionnaire/data', { credentials: 'include' });
+        const response = await fetch('/api/questionnaire/data');
         if (!response.ok) {
             throw new Error(`HTTP error! status: ${response.status}`);
         }
@@ -105,7 +105,6 @@ function displayCurrentSection() {
 }
 
 // ==================== CREATE QUESTION ELEMENT ====================
-
 
 function createQuestionElement(question, questionNumber) {
     const questionDiv = document.createElement('div');
@@ -271,7 +270,6 @@ async function saveProgress() {
     try {
         const response = await fetch('/api/save_responses', {
             method: 'POST',
-            credentials: 'include',
             headers: {
                 'Content-Type': 'application/json'
             },
@@ -301,7 +299,6 @@ async function submitQuestionnaire() {
         
         const response = await fetch('/api/save_responses', {
             method: 'POST',
-            credentials: 'include',
             headers: {
                 'Content-Type': 'application/json'
             },
