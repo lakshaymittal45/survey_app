@@ -75,12 +75,9 @@ if mysql_host and mysql_user and mysql_password and mysql_db:
 else:
     print("⚠️ Database environment variables not fully set. DB not initialized.")
 
-# ----------------------------------------------------------
-# CORS (unchanged)
-# ----------------------------------------------------------
+# 4. CORS: Initialize only if the module was successfully imported
 if CORS:
     CORS(app, resources={r"/*": {"origins": "*"}}, supports_credentials=True)
-
 
 def ensure_questionnaire_tables():
     try:
@@ -393,6 +390,7 @@ def ensure_aadhar_storage_columns():
         print("=== ERROR ENSURING AADHAAR STORAGE COLUMNS ===")
         print(traceback.format_exc())
 
+
 def ensure_household_registry_table():
     try:
         db.session.execute(sql_text("""
@@ -422,7 +420,6 @@ with app.app_context():
     ensure_household_name_unique_index()
     ensure_aadhar_storage_columns()
     ensure_household_registry_table()
-
 
 
 # ==========================================================
@@ -499,22 +496,14 @@ def _ensure_survey_contributor(main_questionnaire_id, user_id):
 def _get_aadhar_enc_key():
     key_raw = (os.environ.get("AADHAR_ENC_KEY") or "").strip()
     if not key_raw:
-        print("⚠️ AADHAR_ENC_KEY not set: Aadhaar encryption will be disabled (fallback mode)")
-        return None
-
+        raise RuntimeError("AADHAR_ENC_KEY is required for Aadhaar encryption")
     # Accept hex (32 chars) or urlsafe base64
-    try:
-        if len(key_raw) == 32 and all(c in "0123456789abcdefABCDEF" for c in key_raw):
-            key = bytes.fromhex(key_raw)
-        else:
-            key = base64.urlsafe_b64decode(key_raw.encode())
-    except Exception:
-        print("⚠️ Failed to decode AADHAR_ENC_KEY; Aadhaar encryption will be disabled")
-        return None
-
+    if len(key_raw) == 32 and all(c in "0123456789abcdefABCDEF" for c in key_raw):
+        key = bytes.fromhex(key_raw)
+    else:
+        key = base64.urlsafe_b64decode(key_raw.encode())
     if len(key) != 16:
-        print("⚠️ AADHAR_ENC_KEY must decode to 16 bytes (128-bit); Aadhaar encryption disabled")
-        return None
+        raise RuntimeError("AADHAR_ENC_KEY must decode to 16 bytes (128-bit)")
     return key
 
 
@@ -522,12 +511,7 @@ def _get_aadhar_hash_key():
     key_raw = (os.environ.get("AADHAR_HASH_KEY") or "").strip()
     if not key_raw:
         # Fall back to encryption key if a dedicated hash key is not provided
-        k = _get_aadhar_enc_key()
-        if k:
-            return k
-        # As a last resort derive a stable key from FLASK_SECRET_KEY so hashing still works
-        secret = (os.environ.get("FLASK_SECRET_KEY") or "__fallback_flask_secret__").encode()
-        return hashlib.sha256(secret).digest()
+        return _get_aadhar_enc_key()
     if len(key_raw) == 64 and all(c in "0123456789abcdefABCDEF" for c in key_raw):
         return bytes.fromhex(key_raw)
     return base64.urlsafe_b64decode(key_raw.encode())
@@ -536,17 +520,14 @@ def _get_aadhar_hash_key():
 def encrypt_aadhar(plain):
     if plain is None:
         return None
+    if AESGCM is None:
+        raise RuntimeError("cryptography is required for Aadhaar encryption")
     value = str(plain).strip()
     if not value:
         return ""
     if value.startswith("v1:"):
         return value
     key = _get_aadhar_enc_key()
-    # If encryption unavailable, fall back to storing a base64-prefixed plain token (v0)
-    if AESGCM is None or key is None:
-        token = base64.urlsafe_b64encode(value.encode("utf-8")).decode("utf-8")
-        return f"v0:{token}"
-
     aes = AESGCM(key)
     nonce = os.urandom(12)
     ct = aes.encrypt(nonce, value.encode("utf-8"), None)
@@ -560,24 +541,11 @@ def decrypt_aadhar(enc):
     value = str(enc)
     if not value:
         return ""
-    # v0: plain base64 (fallback when encryption disabled)
-    if value.startswith("v0:"):
-        try:
-            token = value[3:]
-            return base64.urlsafe_b64decode(token.encode("utf-8")).decode("utf-8")
-        except Exception:
-            return value
-
-    # v1: AES-GCM encrypted
     if not value.startswith("v1:"):
         return value
-
+    if AESGCM is None:
+        raise RuntimeError("cryptography is required for Aadhaar decryption")
     key = _get_aadhar_enc_key()
-    if AESGCM is None or key is None:
-        # Can't decrypt; return stored value to avoid crashing
-        print("⚠️ Cannot decrypt Aadhaar: cryptography/AADHAR_ENC_KEY unavailable")
-        return value
-
     aes = AESGCM(key)
     token = value[3:]
     raw = base64.urlsafe_b64decode(token.encode("utf-8"))
@@ -741,6 +709,7 @@ def column_is_auto_increment(table_name: str, column_name: str) -> bool:
     except Exception:
         return False
 
+
 def table_exists(table_name: str) -> bool:
     try:
         row = db.session.execute(sql_text("""
@@ -753,7 +722,8 @@ def table_exists(table_name: str) -> bool:
         return bool(row)
     except Exception:
         return False
-    
+
+
 def next_id(table_name: str, column_name: str) -> int:
     row = db.session.execute(sql_text(f"""
         SELECT COALESCE(MAX({column_name}), 0) + 1 AS next_id
@@ -946,7 +916,6 @@ def normalize_question_payload(data: dict):
     if parent_id == 0:
         parent_id = None
 
-    # Initialize and normalize trigger_value
     trigger_value = data.get("trigger_value", None)
     if isinstance(trigger_value, str):
         trigger_value = trigger_value.strip()
@@ -1246,6 +1215,37 @@ def get_villages_by_subcenter(sub_center_id):
         return json_error(str(e), 500)
 
 
+@app.route("/api/household-registry")
+def get_household_registry():
+    try:
+        village_id = safe_int(request.args.get("village_id"))
+        q = (request.args.get("q") or "").strip()
+
+        if not village_id:
+            return json_error("village_id is required", 400)
+        if not table_exists("household_registry"):
+            return jsonify([])
+
+        params = {"vid": village_id}
+        query = """
+            SELECT registry_id, household_code
+            FROM household_registry
+            WHERE village_id = :vid
+        """
+        if q:
+            query += " AND household_code LIKE :q"
+            params["q"] = f"%{q}%"
+        query += " ORDER BY household_code LIMIT 50"
+
+        rows = db.session.execute(sql_text(query), params).mappings().all()
+        return jsonify([
+            {"registry_id": r["registry_id"], "household_code": r["household_code"]}
+            for r in rows
+        ])
+    except Exception as e:
+        return json_error(str(e), 500)
+
+
 @app.route("/api/household", methods=["POST"])
 def household():
     if session.get("role") != "user":
@@ -1412,7 +1412,6 @@ def household():
         return json_error(str(e), 500)
 
 
-
 @app.route("/api/resume-household", methods=["POST"])
 def resume_household():
     if session.get("role") != "user":
@@ -1513,7 +1512,6 @@ def get_questionnaire_data():
         return jsonify(result)
     except Exception as e:
         return json_error(str(e), 500)
-
 
 @app.route("/api/individual-questionnaire-data")
 def get_individual_questionnaire_data():
@@ -1802,6 +1800,7 @@ def complete_household_survey():
             """), {"hid": household_id}).mappings().fetchone()
             if row:
                 main_id = row["main_questionnaire_id"]
+
         if not main_id:
             return json_error("Main questionnaire not found.", 404)
 
@@ -1821,7 +1820,7 @@ def complete_household_survey():
                 UPDATE main_questionnaire_responses
                 SET responses = :resp
                 WHERE main_questionnaire_id = :mid
-            """), {"resp": payload, "mid": main_id})
+            """), {"resp": json.dumps(payload), "mid": main_id})
 
         _ensure_survey_contributor(main_id, user_id)
         db.session.commit()
@@ -2297,23 +2296,21 @@ def admin_filter_households():
                 d.name AS district_name,
                 b.name AS block_name,
                 sc.name AS sub_center_name,
-                v.village_name,
-                v.village_lgd_code,
-                m.main_questionnaire_id,
-                m.responses
+                v.village_lgd_code AS village_lgd_code
             FROM households h
-            INNER JOIN users u ON h.user_id = u.user_id
-            INNER JOIN states s ON h.state_id = s.state_id
-            INNER JOIN districts d ON h.district_id = d.district_id
-            INNER JOIN blocks b ON h.block_id = b.block_id
-            INNER JOIN sub_centers sc ON h.sub_center_id = sc.sub_center_id
-            INNER JOIN villages v ON h.village_id = v.village_id
-            INNER JOIN (
+            LEFT JOIN (
                 SELECT household_id, MAX(main_questionnaire_id) AS main_questionnaire_id
                 FROM main_questionnaire_responses
                 GROUP BY household_id
             ) mm ON mm.household_id = h.household_id
-            INNER JOIN main_questionnaire_responses m ON m.main_questionnaire_id = mm.main_questionnaire_id
+            LEFT JOIN survey_contributors contrib ON contrib.main_questionnaire_id = mm.main_questionnaire_id
+            LEFT JOIN users u ON contrib.user_id = u.user_id
+            LEFT JOIN users u_owner ON h.user_id = u_owner.user_id
+            LEFT JOIN states s ON h.state_id = s.state_id
+            LEFT JOIN districts d ON h.district_id = d.district_id
+            LEFT JOIN blocks b ON h.block_id = b.block_id
+            LEFT JOIN sub_centers sc ON h.sub_center_id = sc.sub_center_id
+            LEFT JOIN villages v ON h.village_id = v.village_id
         """
 
         filters = []
@@ -2446,6 +2443,7 @@ def admin_export_household_responses():
         if village_id:
             filters.append("h.village_id = :village_id")
             params["village_id"] = village_id
+
         if filters:
             base += " WHERE " + " AND ".join(filters)
         base += " ORDER BY h.household_id DESC"
@@ -2466,8 +2464,14 @@ def admin_export_household_responses():
             "village_lgd_code",
             "main_questionnaire_id",
             "individual_questionnaire_id",
-            "member_name",
             "member_aadhar",
+            "member_name",
+            "section_order",
+            "section_title",
+            "question_order",
+            "question_id",
+            "question_text",
+            "answer",
             "submitted_at",
             "submitted_by",
         ]
@@ -2608,7 +2612,6 @@ def admin_export_main_wide():
         return csv_response("main_questionnaire_wide.csv", out_rows, headers)
     except Exception as e:
         return json_error(str(e), 500, traceback.format_exc())
-
 
 
 @app.route("/api/admin/households/export/individual-wide")
@@ -3392,6 +3395,7 @@ def admin_create_village():
         db.session.rollback()
         return json_error(str(e), 500, traceback.format_exc())
 
+
 @app.route("/api/admin/village/<int:village_lgd_code>", methods=["PUT"])
 @role_required("admin")
 def admin_update_village(village_lgd_code):
@@ -3439,6 +3443,7 @@ def admin_update_village(village_lgd_code):
     except Exception as e:
         db.session.rollback()
         return json_error(str(e), 500, traceback.format_exc())
+
 
 @app.route("/api/admin/village/<int:village_lgd_code>", methods=["DELETE"])
 @role_required("admin")
@@ -3488,6 +3493,7 @@ def admin_create_household_registry():
     except Exception as e:
         db.session.rollback()
         return json_error(str(e), 500, traceback.format_exc())
+
 
 @app.route("/api/admin/locations/bulk/<level>", methods=["POST"])
 @role_required("admin")
@@ -3959,6 +3965,7 @@ def admin_delete_individual_question(question_id):
         db.session.rollback()
         return json_error(str(e), 500, traceback.format_exc())
 
+
 # ==========================================================
 # QUESTION TREE (used by questionnaire_manager.html)
 # ==========================================================
@@ -3996,6 +4003,7 @@ def get_questions_tree(section_id):
         return jsonify(build_tree())
     except Exception as e:
         return json_error(str(e), 500, traceback.format_exc())
+
 
 # ==========================================================
 # ADMIN USER/ADMIN MGMT
@@ -4084,7 +4092,7 @@ def admin_delete_admin(admin_id):
 def health_db():
     try:
         counts = {}
-        for table in ["states", "districts", "blocks", "sub_centers", "villages", "households"]:
+        for table in ["states", "districts", "blocks", "sub_centers", "villages", "households", "household_registry"]:
             r = db.session.execute(sql_text(f"SELECT COUNT(*) as count FROM {table}")).mappings().fetchone()
             counts[table] = int(r["count"]) if r and "count" in r else 0
         return jsonify({"ok": True, "counts": counts})
@@ -4378,5 +4386,6 @@ def initialize_survey():
 # ==========================================================
 # RUN
 # ==========================================================
+
 if __name__ == "__main__":
     app.run(debug=True)
