@@ -249,6 +249,40 @@
             font-style: italic;
         }
 
+        .autocomplete {
+            position: relative;
+        }
+
+        .suggestions {
+            position: absolute;
+            top: calc(100% + 4px);
+            left: 0;
+            right: 0;
+            background: #fff;
+            border: 1px solid #e0e0e0;
+            border-radius: 8px;
+            box-shadow: 0 6px 18px rgba(0, 0, 0, 0.08);
+            max-height: 220px;
+            overflow-y: auto;
+            display: none;
+            z-index: 20;
+        }
+
+        .suggestions.show {
+            display: block;
+        }
+
+        .suggestion-item {
+            padding: 8px 12px;
+            cursor: pointer;
+            font-size: 0.95em;
+        }
+
+        .suggestion-item:hover,
+        .suggestion-item.active {
+            background: #f3f5ff;
+        }
+
         @media (max-width: 768px) {
             .navbar {
                 flex-direction: column;
@@ -311,15 +345,22 @@
                 <div class="form-row">
                     <div class="form-group">
                         <label>
-                            Household Name
+                            Household ID
                             <span class="required">*</span>
                         </label>
-                        <input 
-                            type="text" 
-                            id="householdName" 
-                            placeholder="Enter household name" 
-                            required
-                        >
+                        <div class="autocomplete">
+                            <input 
+                                type="text" 
+                                id="householdCode" 
+                                placeholder="Type household ID (e.g., HBCH/001)" 
+                                autocomplete="off"
+                                disabled
+                                required
+                            >
+                            <input type="hidden" id="householdRegistryId">
+                            <div id="householdSuggestions" class="suggestions"></div>
+                        </div>
+                        <div class="helper-text" id="householdHelper"></div>
                     </div>
                 </div>
 
@@ -403,7 +444,8 @@
         function saveDraft() {
             try {
                 const payload = {
-                    householdName: householdNameInput.value || '',
+                    householdCode: householdCodeInput.value || '',
+                    householdRegistryId: householdRegistryIdInput.value || '',
                     stateId: stateSelect.value || '',
                     districtId: districtSelect.value || '',
                     blockId: blockSelect.value || '',
@@ -447,11 +489,15 @@
         const blockSelect = document.getElementById('block');
         const subCenterSelect = document.getElementById('subCenter');
         const villageSelect = document.getElementById('village');
-        const householdNameInput = document.getElementById('householdName');
+        const householdCodeInput = document.getElementById('householdCode');
+        const householdRegistryIdInput = document.getElementById('householdRegistryId');
+        const householdSuggestions = document.getElementById('householdSuggestions');
+        const householdHelper = document.getElementById('householdHelper');
         const submitBtn = document.getElementById('submitBtn');
 
         // Load states on page load
         loadStates();
+        handleVillageChange();
 
         async function loadStates() {
             try {
@@ -588,9 +634,84 @@
                 } else {
                     document.getElementById('villageHelper').textContent = '';
                 }
+                handleVillageChange();
             } catch (error) {
                 showMessage('Error loading villages: ' + error.message, 'error');
                 villageSelect.innerHTML = '<option value="">Error loading villages</option>';
+            }
+        }
+
+        let householdSearchTimer = null;
+        let householdSearchToken = 0;
+
+        function clearHouseholdSuggestions() {
+            householdSuggestions.classList.remove('show');
+            householdSuggestions.innerHTML = '';
+        }
+
+        function setHouseholdSelection(item) {
+            if (!item) return;
+            householdCodeInput.value = item.household_code || '';
+            householdRegistryIdInput.value = item.registry_id || '';
+            clearHouseholdSuggestions();
+            householdHelper.textContent = '';
+            saveDraft();
+        }
+
+        function resetHouseholdSelection(preserveValue = false) {
+            if (!preserveValue) {
+                householdRegistryIdInput.value = '';
+                householdCodeInput.value = '';
+            }
+            clearHouseholdSuggestions();
+        }
+
+        function handleVillageChange(preserveDraft = false) {
+            resetHouseholdSelection(preserveDraft);
+            const villageId = villageSelect.value;
+            if (!villageId) {
+                householdCodeInput.disabled = true;
+                householdHelper.textContent = 'Select a village to load households.';
+                return;
+            }
+            householdCodeInput.disabled = false;
+            const hasSelection = householdRegistryIdInput.value && householdCodeInput.value;
+            householdHelper.textContent = hasSelection ? '' : 'Start typing to search households.';
+        }
+
+        async function fetchHouseholdSuggestions(query) {
+            const villageId = villageSelect.value;
+            if (!villageId) return;
+            const token = ++householdSearchToken;
+
+            try {
+                const res = await fetch(`/api/household-registry?village_id=${encodeURIComponent(villageId)}&q=${encodeURIComponent(query)}`);
+                if (!res.ok) throw new Error('Failed to load households');
+                const items = await res.json();
+                if (token !== householdSearchToken) return;
+
+                if (!items || items.length === 0) {
+                    clearHouseholdSuggestions();
+                    householdHelper.textContent = 'No households found for this village.';
+                    return;
+                }
+
+                householdHelper.textContent = '';
+                householdSuggestions.innerHTML = '';
+                items.forEach((item) => {
+                    const div = document.createElement('div');
+                    div.className = 'suggestion-item';
+                    div.textContent = item.household_code;
+                    div.addEventListener('mousedown', (e) => {
+                        e.preventDefault();
+                        setHouseholdSelection(item);
+                    });
+                    householdSuggestions.appendChild(div);
+                });
+                householdSuggestions.classList.add('show');
+            } catch (error) {
+                clearHouseholdSuggestions();
+                householdHelper.textContent = 'Error loading households.';
             }
         }
 
@@ -598,7 +719,8 @@
             const draft = loadDraft();
             if (!draft) return;
 
-            householdNameInput.value = draft.householdName || '';
+            householdCodeInput.value = draft.householdCode || '';
+            householdRegistryIdInput.value = draft.householdRegistryId || '';
             if (draft.stateId) {
                 stateSelect.value = draft.stateId;
                 selectedState = draft.stateId;
@@ -622,9 +744,29 @@
             if (draft.villageId) {
                 villageSelect.value = draft.villageId;
             }
+            handleVillageChange(true);
         }
 
-        householdNameInput.addEventListener('input', saveDraft);
+        householdCodeInput.addEventListener('input', () => {
+            householdRegistryIdInput.value = '';
+            saveDraft();
+            if (householdCodeInput.disabled) return;
+            const query = householdCodeInput.value.trim();
+            clearTimeout(householdSearchTimer);
+            householdSearchTimer = setTimeout(() => {
+                fetchHouseholdSuggestions(query);
+            }, 200);
+        });
+
+        householdCodeInput.addEventListener('focus', () => {
+            if (householdCodeInput.disabled) return;
+            const query = householdCodeInput.value.trim();
+            fetchHouseholdSuggestions(query);
+        });
+
+        householdCodeInput.addEventListener('blur', () => {
+            setTimeout(clearHouseholdSuggestions, 150);
+        });
 
         stateSelect.addEventListener('change', async function() {
             const stateId = this.value;
@@ -651,23 +793,33 @@
             const subCenterId = this.value;
             selectedSubCenter = subCenterId;
             await loadVillages(subCenterId);
+            handleVillageChange();
             saveDraft();
         });
 
-        villageSelect.addEventListener('change', saveDraft);
+        villageSelect.addEventListener('change', function() {
+            handleVillageChange();
+            saveDraft();
+        });
 
         document.getElementById('householdForm').addEventListener('submit', async function(e) {
             e.preventDefault();
             
-            const householdName = householdNameInput.value.trim();
+            const householdCode = householdCodeInput.value.trim();
+            const householdRegistryId = householdRegistryIdInput.value;
             const stateId = stateSelect.value;
             const districtId = districtSelect.value;
             const blockId = blockSelect.value;
             const subCenterId = subCenterSelect.value;
             const villageId = villageSelect.value;
 
-            if (!householdName || !stateId || !districtId || !villageId || !subCenterId) {
+            if (!householdCode || !stateId || !districtId || !villageId || !subCenterId) {
                 showMessage('Please fill in all required fields', 'error');
+                return;
+            }
+
+            if (!householdRegistryId) {
+                showMessage('Please select a household ID from the dropdown', 'error');
                 return;
             }
 
@@ -682,7 +834,8 @@
                         'Content-Type': 'application/json'
                     },
                     body: JSON.stringify({
-                        household_name: householdName,
+                        household_name: householdCode,
+                        household_registry_id: householdRegistryId,
                         state_id: stateId,
                         district_id: districtId,
                         block_id: blockId,

@@ -751,8 +751,12 @@ function renderQuestion(q, isChild = false) {
     q.children.forEach(c => {
       const childNode = renderQuestion(c, true);
 
-      // show if parent answer matches trigger
-      if (responses[q.question_id] === c.trigger_value) {
+      // show if parent answer matches trigger (supports multi-select)
+      const parentVal = responses[q.question_id];
+      const shouldShow = Array.isArray(parentVal)
+        ? parentVal.includes(c.trigger_value)
+        : parentVal === c.trigger_value;
+      if (shouldShow) {
         childNode.classList.remove('hidden');
       }
 
@@ -802,23 +806,24 @@ function saveAnswer(qid, val, qtype) {
     body: JSON.stringify({ section_id: currentSectionId, responses })
   }).catch(() => { /* ignore */ });
 
-  // child trigger logic works only for single-value answers
-  if (qtype !== 'multiple_choice' && qtype !== 'checkbox') {
-    const childWrap = document.getElementById(`child_wrap_${qid}`);
-    if (childWrap) {
-      Array.from(childWrap.children).forEach(child => {
-        const trigger = child.dataset.trigger;
-        if (trigger === val) {
-          child.classList.remove('hidden');
-        } else {
-          child.classList.add('hidden');
-
-          // delete child answer by its qid
-          const childQid = child.id.replace('qbox_', '');
-          delete responses[childQid];
-        }
-      });
-    }
+  // child trigger logic (supports single + multi)
+  const childWrap = document.getElementById(`child_wrap_${qid}`);
+  if (childWrap) {
+    const currentVal = responses[qid];
+    Array.from(childWrap.children).forEach(child => {
+      const trigger = child.dataset.trigger;
+      const shouldShow = Array.isArray(currentVal)
+        ? currentVal.includes(trigger)
+        : currentVal === trigger;
+      if (shouldShow) {
+        child.classList.remove('hidden');
+      } else {
+        child.classList.add('hidden');
+        // delete child answer by its qid
+        const childQid = child.id.replace('qbox_', '');
+        delete responses[childQid];
+      }
+    });
   }
 }
 
@@ -1272,7 +1277,11 @@ function renderIndividualQuestion(q, isChild = false) {
     q.children.forEach(c => {
       const childNode = renderIndividualQuestion(c, true);
 
-      if (iqResponses[q.question_id] === c.trigger_value) {
+      const parentVal = iqResponses[q.question_id];
+      const shouldShow = Array.isArray(parentVal)
+        ? parentVal.includes(c.trigger_value)
+        : parentVal === c.trigger_value;
+      if (shouldShow) {
         childNode.classList.remove('hidden');
       }
 
@@ -1296,20 +1305,22 @@ function saveIndividualAnswer(qid, val, qtype) {
     iqResponses[qid] = val;
   }
 
-  if (qtype !== 'multiple_choice' && qtype !== 'checkbox') {
-    const childWrap = document.getElementById(`iq_child_wrap_${qid}`);
-    if (childWrap) {
-      Array.from(childWrap.children).forEach(child => {
-        const trigger = child.dataset.trigger;
-        if (trigger === val) {
-          child.classList.remove('hidden');
-        } else {
-          child.classList.add('hidden');
-          const childQid = child.id.replace('iq_qbox_', '');
-          delete iqResponses[childQid];
-        }
-      });
-    }
+  const childWrap = document.getElementById(`iq_child_wrap_${qid}`);
+  if (childWrap) {
+    const currentVal = iqResponses[qid];
+    Array.from(childWrap.children).forEach(child => {
+      const trigger = child.dataset.trigger;
+      const shouldShow = Array.isArray(currentVal)
+        ? currentVal.includes(trigger)
+        : currentVal === trigger;
+      if (shouldShow) {
+        child.classList.remove('hidden');
+      } else {
+        child.classList.add('hidden');
+        const childQid = child.id.replace('iq_qbox_', '');
+        delete iqResponses[childQid];
+      }
+    });
   }
 
   persistSurveyDraft();
