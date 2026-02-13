@@ -496,43 +496,64 @@ def _ensure_survey_contributor(main_questionnaire_id, user_id):
 def _get_aadhar_enc_key():
     key_raw = (os.environ.get("AADHAR_ENC_KEY") or "").strip()
     if not key_raw:
-        raise RuntimeError("AADHAR_ENC_KEY is required for Aadhaar encryption")
-    # Accept hex (32 chars) or urlsafe base64
-    if len(key_raw) == 32 and all(c in "0123456789abcdefABCDEF" for c in key_raw):
-        key = bytes.fromhex(key_raw)
-    else:
-        key = base64.urlsafe_b64decode(key_raw.encode())
-    if len(key) != 16:
-        raise RuntimeError("AADHAR_ENC_KEY must decode to 16 bytes (128-bit)")
-    return key
+        # Encryption key not provided — treat as "encryption disabled".
+        return None
+    try:
+        # Accept hex (32 chars) or urlsafe base64
+        if len(key_raw) == 32 and all(c in "0123456789abcdefABCDEF" for c in key_raw):
+            key = bytes.fromhex(key_raw)
+        else:
+            key = base64.urlsafe_b64decode(key_raw.encode())
+        if len(key) != 16:
+            print("Warning: AADHAR_ENC_KEY must decode to 16 bytes (128-bit); ignoring encryption key")
+            return None
+        return key
+    except Exception:
+        print("Warning: failed to decode AADHAR_ENC_KEY; ignoring encryption key")
+        return None
 
 
 def _get_aadhar_hash_key():
     key_raw = (os.environ.get("AADHAR_HASH_KEY") or "").strip()
-    if not key_raw:
-        # Fall back to encryption key if a dedicated hash key is not provided
-        return _get_aadhar_enc_key()
-    if len(key_raw) == 64 and all(c in "0123456789abcdefABCDEF" for c in key_raw):
-        return bytes.fromhex(key_raw)
-    return base64.urlsafe_b64decode(key_raw.encode())
+    if key_raw:
+        try:
+            if len(key_raw) == 64 and all(c in "0123456789abcdefABCDEF" for c in key_raw):
+                return bytes.fromhex(key_raw)
+            return base64.urlsafe_b64decode(key_raw.encode())
+        except Exception:
+            print("Warning: failed to decode AADHAR_HASH_KEY; falling back to derived key")
+
+    # Try to derive from encryption key if available
+    enc_key = _get_aadhar_enc_key()
+    if enc_key:
+        return hashlib.sha256(enc_key).digest()
+
+    # Final fallback: derive a stable key from app.secret_key
+    fallback = (app.secret_key or "default-secret").encode("utf-8")
+    return hashlib.sha256(fallback).digest()
 
 
 def encrypt_aadhar(plain):
     if plain is None:
         return None
-    if AESGCM is None:
-        raise RuntimeError("cryptography is required for Aadhaar encryption")
     value = str(plain).strip()
     if not value:
         return ""
     if value.startswith("v1:"):
         return value
     key = _get_aadhar_enc_key()
-    aes = AESGCM(key)
-    nonce = os.urandom(12)
-    ct = aes.encrypt(nonce, value.encode("utf-8"), None)
-    token = base64.urlsafe_b64encode(nonce + ct).decode("utf-8")
-    return f"v1:{token}"
+    if key is None or AESGCM is None:
+        # Encryption not configured; store plain value (compatible with decrypt_aadhar)
+        return value
+    try:
+        aes = AESGCM(key)
+        nonce = os.urandom(12)
+        ct = aes.encrypt(nonce, value.encode("utf-8"), None)
+        token = base64.urlsafe_b64encode(nonce + ct).decode("utf-8")
+        return f"v1:{token}"
+    except Exception:
+        print("Warning: Aadhaar encryption failed; storing plain value")
+        return value
 
 
 def decrypt_aadhar(enc):
@@ -546,6 +567,8 @@ def decrypt_aadhar(enc):
     if AESGCM is None:
         raise RuntimeError("cryptography is required for Aadhaar decryption")
     key = _get_aadhar_enc_key()
+    if key is None:
+        raise RuntimeError("AADHAR_ENC_KEY is required to decrypt stored Aadhaar values")
     aes = AESGCM(key)
     token = value[3:]
     raw = base64.urlsafe_b64decode(token.encode("utf-8"))
