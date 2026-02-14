@@ -313,6 +313,151 @@
                 padding: 20px;
             }
         }
+
+        /* Modal Styles */
+        .modal-overlay {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.6);
+            backdrop-filter: blur(4px);
+            z-index: 1000;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .modal-overlay.show {
+            display: flex;
+        }
+
+        .modal-content {
+            background: white;
+            border-radius: 16px;
+            padding: 0;
+            max-width: 520px;
+            width: 90%;
+            box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.25);
+            animation: modalSlideIn 0.3s;
+            overflow: hidden;
+        }
+
+        @keyframes modalSlideIn {
+            from {
+                opacity: 0;
+                transform: translateY(-30px) scale(0.95);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0) scale(1);
+            }
+        }
+
+        .modal-header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            padding: 24px 30px;
+            border-bottom: 1px solid #e5e7eb;
+        }
+
+        .modal-header h3 {
+            color: white;
+            margin: 0 0 8px 0;
+            font-size: 1.4em;
+            font-weight: 700;
+            letter-spacing: -0.02em;
+        }
+
+        .modal-header p {
+            color: rgba(255, 255, 255, 0.9);
+            margin: 0;
+            line-height: 1.5;
+            font-size: 0.95em;
+        }
+
+        .modal-body {
+            padding: 30px;
+        }
+
+        .location-info {
+            background: #f8fafc;
+            padding: 20px;
+            border-radius: 10px;
+            margin-bottom: 24px;
+            border: 1px solid #e2e8f0;
+            border-left: 4px solid #667eea;
+        }
+
+        .location-info p {
+            margin: 10px 0;
+            color: #475569;
+            font-size: 0.95em;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .location-info p:first-child {
+            margin-top: 0;
+        }
+
+        .location-info p:last-child {
+            margin-bottom: 0;
+        }
+
+        .location-info strong {
+            color: #1e293b;
+            font-weight: 600;
+            min-width: 130px;
+        }
+
+        .location-info span {
+            color: #64748b;
+            font-family: 'Courier New', monospace;
+            font-size: 0.9em;
+        }
+
+        .modal-actions {
+            display: flex;
+            gap: 12px;
+        }
+
+        .modal-btn {
+            flex: 1;
+            padding: 14px 24px;
+            border: none;
+            border-radius: 10px;
+            cursor: pointer;
+            font-weight: 600;
+            font-size: 0.95em;
+            transition: all 0.2s;
+            letter-spacing: 0.01em;
+        }
+
+        .modal-btn-keep {
+            background: #fff;
+            color: #059669;
+            border: 2px solid #059669;
+        }
+
+        .modal-btn-keep:hover {
+            background: #059669;
+            color: white;
+            transform: translateY(-1px);
+            box-shadow: 0 4px 12px rgba(5, 150, 105, 0.3);
+        }
+
+        .modal-btn-update {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: 2px solid transparent;
+        }
+
+        .modal-btn-update:hover {
+            transform: translateY(-1px);
+            box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
+        }
     </style>
 </head>
 <body>
@@ -426,6 +571,31 @@
                     Create Household & Mark Location
                 </button>
             </form>
+        </div>
+    </div>
+
+    <!-- Location Confirmation Modal -->
+    <div class="modal-overlay" id="locationModal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3>Location Already Set</h3>
+                <p>This household already has a saved location. Would you like to keep it or update?</p>
+            </div>
+            
+            <div class="modal-body">
+                <div class="location-info" id="locationInfo">
+                    <!-- Location details will be inserted here -->
+                </div>
+                
+                <div class="modal-actions">
+                    <button class="modal-btn modal-btn-keep" onclick="keepExistingLocation()">
+                        Keep & Continue Survey
+                    </button>
+                    <button class="modal-btn modal-btn-update" onclick="updateLocation()">
+                        Update Location
+                    </button>
+                </div>
+            </div>
         </div>
     </div>
 
@@ -848,15 +1018,25 @@
                 const result = await response.json();
 
                 if (response.ok && result.success) {
-                    const msg = result.resumed
-                        ? 'Household resumed! Redirecting to mark location...'
-                        : 'Household created! Please mark the location on the map...';
-                    showMessage(msg, 'success');
                     clearDraft();
                     try { localStorage.removeItem('survey_draft_v1'); } catch (e) {}
-                    setTimeout(() => {
-                        window.location.href = '/mark-location';
-                    }, 1500);
+                    
+                    // Check if household is resumed and has existing location
+                    if (result.resumed && result.has_location) {
+                        // Show location confirmation modal
+                        showLocationModal(result.location);
+                        submitBtn.disabled = false;
+                        submitBtn.innerHTML = 'Create Household & Mark Location';
+                    } else {
+                        // New household or no location - go to mark location
+                        const msg = result.resumed
+                            ? 'Household resumed! Redirecting to mark location...'
+                            : 'Household created! Please mark the location on the map...';
+                        showMessage(msg, 'success');
+                        setTimeout(() => {
+                            window.location.href = '/mark-location';
+                        }, 1500);
+                    }
                 } else {
                     showMessage(result.error || 'Failed to create household', 'error');
                     submitBtn.disabled = false;
@@ -868,6 +1048,49 @@
                 submitBtn.innerHTML = 'Create Household & Mark Location';
             }
         });
+
+        function showLocationModal(location) {
+            const modal = document.getElementById('locationModal');
+            const locationInfo = document.getElementById('locationInfo');
+            
+            // Format location info
+            const updatedAt = location.updated_at ? new Date(location.updated_at).toLocaleString('en-US', {
+                year: 'numeric',
+                month: 'short',
+                day: 'numeric',
+                hour: '2-digit',
+                minute: '2-digit'
+            }) : 'Unknown';
+            const accuracy = location.accuracy ? `${location.accuracy.toFixed(1)}m` : 'Unknown';
+            
+            locationInfo.innerHTML = `
+                <p><strong>Coordinates:</strong> <span>${location.latitude.toFixed(6)}, ${location.longitude.toFixed(6)}</span></p>
+                <p><strong>Accuracy:</strong> <span>${accuracy}</span></p>
+                <p><strong>Last Updated:</strong> <span>${updatedAt}</span></p>
+            `;
+            
+            modal.classList.add('show');
+        }
+
+        function keepExistingLocation() {
+            // Close modal and go directly to survey
+            const modal = document.getElementById('locationModal');
+            modal.classList.remove('show');
+            showMessage('Proceeding with existing location...', 'success');
+            setTimeout(() => {
+                window.location.href = '/survey';
+            }, 800);
+        }
+
+        function updateLocation() {
+            // Close modal and go to mark location page
+            const modal = document.getElementById('locationModal');
+            modal.classList.remove('show');
+            showMessage('Redirecting to update location...', 'success');
+            setTimeout(() => {
+                window.location.href = '/mark-location';
+            }, 800);
+        }
 
         function showMessage(msg, type) {
             const messageEl = document.getElementById('message');

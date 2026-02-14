@@ -77,6 +77,51 @@
             color: #333;
         }
         
+        .search-wrapper {
+            position: relative;
+            width: 100%;
+            margin-bottom: 12px;
+        }
+        
+        .search-icon {
+            position: absolute;
+            left: 12px;
+            top: 50%;
+            transform: translateY(-50%);
+            color: #667eea;
+            font-size: 16px;
+            pointer-events: none;
+        }
+        
+        .search-box {
+            width: 100%;
+            padding: 12px 12px 12px 38px;
+            border: 2px solid #e5e7eb;
+            border-radius: 8px;
+            font-size: 14px;
+            font-family: inherit;
+            transition: all 0.3s;
+            background: white;
+        }
+        
+        .search-box:focus {
+            outline: none;
+            border-color: #667eea;
+            box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+        }
+        
+        .search-box::placeholder {
+            color: #9ca3af;
+        }
+        
+        .search-hint {
+            font-size: 12px;
+            color: #6b7280;
+            margin-top: -8px;
+            margin-bottom: 12px;
+            font-style: italic;
+        }
+        
         .map-controls button {
             width: 100%;
             padding: 10px;
@@ -171,7 +216,20 @@
     </div>
     
     <div class="map-controls">
-        <h3>Map Controls</h3>
+        <h3>🔍 Search Households</h3>
+        <div class="search-wrapper">
+            <span class="search-icon">🔍</span>
+            <input 
+                type="text" 
+                id="searchBox" 
+                class="search-box" 
+                placeholder="Type to search..."
+                oninput="searchHouseholds()"
+            />
+        </div>
+        <div class="search-hint" id="searchHint">Showing all households</div>
+        
+        <h3 style="margin-top: 8px;">🗺️ Map Controls</h3>
         <button class="btn-satellite" onclick="setSatelliteView()">🛰️ Satellite View</button>
         <button class="btn-street" onclick="setStreetView()">🗺️ Street View</button>
         <button class="btn-refresh" onclick="refreshLocations()">🔄 Refresh Data</button>
@@ -198,6 +256,7 @@
     <script>
         let map;
         let markers = [];
+        let householdMarkers = []; // Store all household marker data
         let satelliteLayer;
         let streetLayer;
         
@@ -233,9 +292,13 @@
                 
                 const households = data.households;
                 
-                // Clear existing markers
-                markers.forEach(marker => map.removeLayer(marker));
+                // Clear existing markers and labels
+                householdMarkers.forEach(item => {
+                    map.removeLayer(item.marker);
+                    map.removeLayer(item.labelMarker);
+                });
                 markers = [];
+                householdMarkers = [];
                 
                 // Update stats
                 document.getElementById('totalCount').textContent = households.length;
@@ -261,8 +324,15 @@
                             iconAnchor: [30, 30]
                         });
                         
-                        L.marker([household.latitude, household.longitude], { icon: icon })
+                        const labelMarker = L.marker([household.latitude, household.longitude], { icon: icon })
                             .addTo(map);
+                        
+                        // Store marker data for search
+                        householdMarkers.push({
+                            household: household,
+                            marker: marker,
+                            labelMarker: labelMarker
+                        });
                         
                         markers.push(marker);
                         bounds.push([household.latitude, household.longitude]);
@@ -327,6 +397,70 @@
         
         function refreshLocations() {
             loadLocations();
+        }
+        
+        function searchHouseholds() {
+            const searchBox = document.getElementById('searchBox');
+            const searchHint = document.getElementById('searchHint');
+            const searchTerm = searchBox.value.toLowerCase().trim();
+            let visibleCount = 0;
+            const visibleBounds = [];
+            
+            householdMarkers.forEach(item => {
+                const h = item.household;
+                const searchableText = [
+                    h.name,
+                    h.village_name,
+                    h.block_name,
+                    h.district_name,
+                    h.state_name,
+                    h.username,
+                    String(h.household_id)
+                ].filter(v => v).join(' ').toLowerCase();
+                
+                if (!searchTerm || searchableText.includes(searchTerm)) {
+                    map.addLayer(item.marker);
+                    map.addLayer(item.labelMarker);
+                    visibleCount++;
+                    visibleBounds.push([h.latitude, h.longitude]);
+                } else {
+                    map.removeLayer(item.marker);
+                    map.removeLayer(item.labelMarker);
+                }
+            });
+            
+            // Update location count and hint
+            document.getElementById('locationCount').textContent = visibleCount;
+            
+            if (searchTerm) {
+                searchHint.textContent = `Found ${visibleCount} household${visibleCount !== 1 ? 's' : ''} matching "${searchBox.value}"`;
+                searchHint.style.color = visibleCount > 0 ? '#059669' : '#dc2626';
+                
+                // Zoom to visible households
+                if (visibleBounds.length === 1) {
+                    // Single result - zoom closer
+                    map.setView(visibleBounds[0], 16, { animate: true, duration: 0.5 });
+                } else if (visibleBounds.length > 1) {
+                    // Multiple results - fit bounds
+                    map.fitBounds(visibleBounds, { 
+                        padding: [50, 50],
+                        animate: true,
+                        duration: 0.5
+                    });
+                }
+            } else {
+                searchHint.textContent = 'Showing all households';
+                searchHint.style.color = '#6b7280';
+                
+                // Reset to show all households
+                if (visibleBounds.length > 0) {
+                    map.fitBounds(visibleBounds, { 
+                        padding: [30, 30],
+                        animate: true,
+                        duration: 0.5
+                    });
+                }
+            }
         }
         
         // Initialize on load

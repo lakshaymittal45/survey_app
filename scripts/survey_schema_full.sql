@@ -139,40 +139,60 @@ CREATE TABLE IF NOT EXISTS households (
   name VARCHAR(255) NOT NULL,
   household_name VARCHAR(255) GENERATED ALWAYS AS (name) STORED,
   name_ci VARCHAR(255) GENERATED ALWAYS AS (LOWER(name)) STORED,
+
   state_id INT NOT NULL,
   district_id INT NOT NULL,
   block_id INT NOT NULL,
   sub_center_id INT NOT NULL,
   village_id INT NOT NULL,
   user_id INT NOT NULL,
+  latitude DECIMAL(10,8) NULL,
+  longitude DECIMAL(11,8) NULL,
+  location_accuracy DECIMAL(8,2) NULL,
+  location_updated_at TIMESTAMP 
+      DEFAULT CURRENT_TIMESTAMP 
+      ON UPDATE CURRENT_TIMESTAMP,
+  location_method ENUM('gps','manual','map') NULL,
+
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+
   PRIMARY KEY (household_id),
+
   UNIQUE KEY uk_households_name_ci (name_ci),
+
   INDEX idx_households_state (state_id),
   INDEX idx_households_district (district_id),
   INDEX idx_households_block (block_id),
   INDEX idx_households_subcenter (sub_center_id),
   INDEX idx_households_village (village_id),
   INDEX idx_households_user (user_id),
+  INDEX idx_households_location (latitude, longitude),
+
   CONSTRAINT fk_household_state
     FOREIGN KEY (state_id) REFERENCES states(state_id)
     ON DELETE RESTRICT ON UPDATE CASCADE,
+
   CONSTRAINT fk_household_district
     FOREIGN KEY (district_id) REFERENCES districts(district_id)
     ON DELETE RESTRICT ON UPDATE CASCADE,
+
   CONSTRAINT fk_household_block
     FOREIGN KEY (block_id) REFERENCES blocks(block_id)
     ON DELETE RESTRICT ON UPDATE CASCADE,
+
   CONSTRAINT fk_household_subcenter
     FOREIGN KEY (sub_center_id) REFERENCES sub_centers(sub_center_id)
     ON DELETE RESTRICT ON UPDATE CASCADE,
+
   CONSTRAINT fk_household_village
     FOREIGN KEY (village_id) REFERENCES villages(village_id)
     ON DELETE RESTRICT ON UPDATE CASCADE,
+
   CONSTRAINT fk_household_user
     FOREIGN KEY (user_id) REFERENCES users(user_id)
     ON DELETE RESTRICT ON UPDATE CASCADE
+
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 -- ==========================================================

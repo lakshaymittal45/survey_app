@@ -1420,6 +1420,15 @@ def household():
             draft_payload = safe_json_load(draft_row["response_data"]) if draft_row else {}
             combined = _combine_draft_sections(draft_payload)
 
+            # Get location data
+            location_row = db.session.execute(sql_text("""
+                SELECT latitude, longitude, location_accuracy, location_updated_at
+                FROM households
+                WHERE household_id = :hid
+            """), {"hid": household_id}).mappings().fetchone()
+            
+            has_location = location_row and location_row["latitude"] is not None and location_row["longitude"] is not None
+            
             db.session.commit()
             return jsonify({
                 "success": True,
@@ -1427,7 +1436,14 @@ def household():
                 "main_questionnaire_id": main_id,
                 "resumed": True,
                 "draft": draft_payload,
-                "responses": combined
+                "responses": combined,
+                "has_location": has_location,
+                "location": {
+                    "latitude": float(location_row["latitude"]) if location_row and location_row["latitude"] else None,
+                    "longitude": float(location_row["longitude"]) if location_row and location_row["longitude"] else None,
+                    "accuracy": float(location_row["location_accuracy"]) if location_row and location_row["location_accuracy"] else None,
+                    "updated_at": location_row["location_updated_at"].isoformat() if location_row and location_row["location_updated_at"] else None
+                } if has_location else None
             })
 
         village_id = int(data["village_id"])
@@ -1514,7 +1530,14 @@ def household():
         db.session.commit()
         session["main_questionnaire_id"] = main_id
 
-        return jsonify({"success": True, "household_id": household_id, "main_questionnaire_id": main_id, "resumed": False})
+        return jsonify({
+            "success": True, 
+            "household_id": household_id, 
+            "main_questionnaire_id": main_id, 
+            "resumed": False,
+            "has_location": False,
+            "location": None
+        })
 
     except Exception as e:
         db.session.rollback()
