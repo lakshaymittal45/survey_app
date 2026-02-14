@@ -529,6 +529,36 @@
         font-size: 11px;
         cursor: pointer;
       }
+      .qm-multi {
+        border: 1px solid #e5e7eb;
+        border-radius: 8px;
+        background: #fff;
+        padding: 8px 10px;
+      }
+      .qm-multi summary {
+        cursor: pointer;
+        font-weight: 600;
+        color: #374151;
+        list-style: none;
+      }
+      .qm-multi summary::-webkit-details-marker {
+        display: none;
+      }
+      .qm-multi-options {
+        margin-top: 8px;
+        display: grid;
+        gap: 6px;
+        max-height: 200px;
+        overflow-y: auto;
+        padding-right: 4px;
+      }
+      .qm-multi-option {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        font-size: 0.9em;
+        color: #1f2937;
+      }
 
       @media (max-width: 1024px) {
         .two-col-grid {
@@ -3759,6 +3789,58 @@
       let iqmCurrentSectionId = null;
       let lastAadhaarLookup = null;
 
+      function formatQuestionLabel(q) {
+        const text = String(q.question_text || "").trim();
+        const trigger = String(q.trigger_value || "").trim();
+        if (trigger) {
+          const prefix = `${trigger} - `;
+          if (text.startsWith(prefix)) return text;
+          return text ? `${prefix}${text}` : trigger;
+        }
+        return text;
+      }
+
+      function readTriggerValues(wrapperId) {
+        const wrapper = document.getElementById(wrapperId);
+        if (!wrapper) return [];
+        const checkboxes = Array.from(
+          wrapper.querySelectorAll('input[type="checkbox"][data-trigger-option="1"]'),
+        );
+        if (checkboxes.length) {
+          const values = checkboxes
+            .filter((c) => c.checked)
+            .map((c) => (c.value || "").trim())
+            .filter(Boolean);
+          const deduped = [];
+          const seen = new Set();
+          values.forEach((v) => {
+            if (!seen.has(v)) {
+              seen.add(v);
+              deduped.push(v);
+            }
+          });
+          return deduped;
+        }
+        const field = wrapper.querySelector("input, select");
+        if (!field) return [];
+        if (field.tagName === "SELECT" && field.multiple) {
+          const values = Array.from(field.selectedOptions)
+            .map((o) => (o.value || "").trim())
+            .filter(Boolean);
+          const deduped = [];
+          const seen = new Set();
+          values.forEach((v) => {
+            if (!seen.has(v)) {
+              seen.add(v);
+              deduped.push(v);
+            }
+          });
+          return deduped;
+        }
+        const val = (field.value || "").trim();
+        return val ? [val] : [];
+      }
+
       function buildQuestionIndex(questions) {
         const byParent = {};
         const byId = {};
@@ -3773,7 +3855,7 @@
           (byParent[parentId] || []).forEach((q) => {
             ordered.push({
               id: q.question_id,
-              text: q.question_text || "",
+              text: formatQuestionLabel(q),
               depth,
             });
             walk(q.question_id, depth + 1);
@@ -3833,6 +3915,16 @@
         if (value === null || value === undefined || value === "") return;
         const wrapper = document.getElementById(wrapperId);
         if (!wrapper) return;
+        const values = Array.isArray(value) ? value.map(String) : [String(value)];
+        const checkboxes = Array.from(
+          wrapper.querySelectorAll('input[type="checkbox"][data-trigger-option="1"]'),
+        );
+        if (checkboxes.length) {
+          checkboxes.forEach((cb) => {
+            cb.checked = values.includes(cb.value);
+          });
+          return;
+        }
         const field = wrapper.querySelector("input, select");
         if (!field) return;
         const strValue = String(value);
@@ -4000,7 +4092,7 @@
               </div>
               <span class="qm-meta">ID:${escapeAttr(q.question_id)}</span>
             </div>
-            <div class="qm-question">${escapeAttr(q.question_text)}</div>`;
+            <div class="qm-question">${escapeAttr(formatQuestionLabel(q))}</div>`;
 
           if (options.length > 0) {
             html += `
@@ -4054,10 +4146,22 @@
           wrapper.innerHTML =
             '<input type="text" placeholder="Enter trigger value" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px; font-family: inherit;">';
         } else {
-          wrapper.innerHTML =
-            '<select style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px; font-family: inherit;">' +
-            options.map((o) => `<option>${escapeAttr(o)}</option>`).join("") +
-            "</select>";
+          const items = options
+            .map(
+              (o) => `
+              <label class="qm-multi-option">
+                <input type="checkbox" data-trigger-option="1" value="${escapeAttr(o)}">
+                <span>${escapeAttr(o)}</span>
+              </label>
+            `,
+            )
+            .join("");
+          wrapper.innerHTML = `
+            <details class="qm-multi">
+              <summary>Select triggers</summary>
+              <div class="qm-multi-options">${items}</div>
+            </details>
+          `;
         }
         if (triggerValue !== null && triggerValue !== undefined) {
           setTriggerFieldValue("qm_trigger_input_wrapper", triggerValue);
@@ -4119,11 +4223,16 @@
             return;
           }
 
+          const isEditing = !!qmEditingQuestionId;
+          const triggerValues =
+            parentId !== "0" ? readTriggerValues("qm_trigger_input_wrapper") : [];
           const triggerValue =
             parentId !== "0"
-              ? document
-                  .getElementById("qm_trigger_input_wrapper")
-                  .querySelector("input, select")?.value || ""
+              ? (isEditing
+                  ? triggerValues[0] || null
+                  : triggerValues.length
+                    ? triggerValues
+                    : null)
               : null;
           const options =
             questionType === "mcq" || questionType === "checkbox"
@@ -4134,7 +4243,6 @@
               : null;
 
           try {
-            const isEditing = !!qmEditingQuestionId;
             const payload = {
               section_id: parseInt(sectionId),
               question_text: questionText,
@@ -4446,7 +4554,7 @@
               </div>
               <span class="qm-meta">ID:${escapeAttr(q.question_id)}</span>
             </div>
-            <div class="qm-question">${escapeAttr(q.question_text)}</div>`;
+            <div class="qm-question">${escapeAttr(formatQuestionLabel(q))}</div>`;
 
           if (options.length > 0) {
             html += `
@@ -4499,10 +4607,22 @@
           wrapper.innerHTML =
             '<input type="text" placeholder="Enter trigger value" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px; font-family: inherit;">';
         } else {
-          wrapper.innerHTML =
-            '<select style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px; font-family: inherit;">' +
-            options.map((o) => `<option>${escapeAttr(o)}</option>`).join("") +
-            "</select>";
+          const items = options
+            .map(
+              (o) => `
+              <label class="qm-multi-option">
+                <input type="checkbox" data-trigger-option="1" value="${escapeAttr(o)}">
+                <span>${escapeAttr(o)}</span>
+              </label>
+            `,
+            )
+            .join("");
+          wrapper.innerHTML = `
+            <details class="qm-multi">
+              <summary>Select triggers</summary>
+              <div class="qm-multi-options">${items}</div>
+            </details>
+          `;
         }
         if (triggerValue !== null && triggerValue !== undefined) {
           setTriggerFieldValue("iqm_trigger_input_wrapper", triggerValue);
@@ -4565,11 +4685,16 @@
             return;
           }
 
+          const isEditing = !!iqmEditingQuestionId;
+          const triggerValues =
+            parentId !== "0" ? readTriggerValues("iqm_trigger_input_wrapper") : [];
           const triggerValue =
             parentId !== "0"
-              ? document
-                  .getElementById("iqm_trigger_input_wrapper")
-                  .querySelector("input, select")?.value || ""
+              ? (isEditing
+                  ? triggerValues[0] || null
+                  : triggerValues.length
+                    ? triggerValues
+                    : null)
               : null;
           const options =
             questionType === "mcq" || questionType === "checkbox"
@@ -4580,7 +4705,6 @@
               : null;
 
           try {
-            const isEditing = !!iqmEditingQuestionId;
             const payload = {
               section_id: parseInt(sectionId),
               question_text: questionText,

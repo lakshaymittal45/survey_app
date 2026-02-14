@@ -496,64 +496,43 @@ def _ensure_survey_contributor(main_questionnaire_id, user_id):
 def _get_aadhar_enc_key():
     key_raw = (os.environ.get("AADHAR_ENC_KEY") or "").strip()
     if not key_raw:
-        # Encryption key not provided — treat as "encryption disabled".
-        return None
-    try:
-        # Accept hex (32 chars) or urlsafe base64
-        if len(key_raw) == 32 and all(c in "0123456789abcdefABCDEF" for c in key_raw):
-            key = bytes.fromhex(key_raw)
-        else:
-            key = base64.urlsafe_b64decode(key_raw.encode())
-        if len(key) != 16:
-            print("Warning: AADHAR_ENC_KEY must decode to 16 bytes (128-bit); ignoring encryption key")
-            return None
-        return key
-    except Exception:
-        print("Warning: failed to decode AADHAR_ENC_KEY; ignoring encryption key")
-        return None
+        raise RuntimeError("AADHAR_ENC_KEY is required for Aadhaar encryption")
+    # Accept hex (32 chars) or urlsafe base64
+    if len(key_raw) == 32 and all(c in "0123456789abcdefABCDEF" for c in key_raw):
+        key = bytes.fromhex(key_raw)
+    else:
+        key = base64.urlsafe_b64decode(key_raw.encode())
+    if len(key) != 16:
+        raise RuntimeError("AADHAR_ENC_KEY must decode to 16 bytes (128-bit)")
+    return key
 
 
 def _get_aadhar_hash_key():
     key_raw = (os.environ.get("AADHAR_HASH_KEY") or "").strip()
-    if key_raw:
-        try:
-            if len(key_raw) == 64 and all(c in "0123456789abcdefABCDEF" for c in key_raw):
-                return bytes.fromhex(key_raw)
-            return base64.urlsafe_b64decode(key_raw.encode())
-        except Exception:
-            print("Warning: failed to decode AADHAR_HASH_KEY; falling back to derived key")
-
-    # Try to derive from encryption key if available
-    enc_key = _get_aadhar_enc_key()
-    if enc_key:
-        return hashlib.sha256(enc_key).digest()
-
-    # Final fallback: derive a stable key from app.secret_key
-    fallback = (app.secret_key or "default-secret").encode("utf-8")
-    return hashlib.sha256(fallback).digest()
+    if not key_raw:
+        # Fall back to encryption key if a dedicated hash key is not provided
+        return _get_aadhar_enc_key()
+    if len(key_raw) == 64 and all(c in "0123456789abcdefABCDEF" for c in key_raw):
+        return bytes.fromhex(key_raw)
+    return base64.urlsafe_b64decode(key_raw.encode())
 
 
 def encrypt_aadhar(plain):
     if plain is None:
         return None
+    if AESGCM is None:
+        raise RuntimeError("cryptography is required for Aadhaar encryption")
     value = str(plain).strip()
     if not value:
         return ""
     if value.startswith("v1:"):
         return value
     key = _get_aadhar_enc_key()
-    if key is None or AESGCM is None:
-        # Encryption not configured; store plain value (compatible with decrypt_aadhar)
-        return value
-    try:
-        aes = AESGCM(key)
-        nonce = os.urandom(12)
-        ct = aes.encrypt(nonce, value.encode("utf-8"), None)
-        token = base64.urlsafe_b64encode(nonce + ct).decode("utf-8")
-        return f"v1:{token}"
-    except Exception:
-        print("Warning: Aadhaar encryption failed; storing plain value")
-        return value
+    aes = AESGCM(key)
+    nonce = os.urandom(12)
+    ct = aes.encrypt(nonce, value.encode("utf-8"), None)
+    token = base64.urlsafe_b64encode(nonce + ct).decode("utf-8")
+    return f"v1:{token}"
 
 
 def decrypt_aadhar(enc):
@@ -567,8 +546,6 @@ def decrypt_aadhar(enc):
     if AESGCM is None:
         raise RuntimeError("cryptography is required for Aadhaar decryption")
     key = _get_aadhar_enc_key()
-    if key is None:
-        raise RuntimeError("AADHAR_ENC_KEY is required to decrypt stored Aadhaar values")
     aes = AESGCM(key)
     token = value[3:]
     raw = base64.urlsafe_b64decode(token.encode("utf-8"))
@@ -958,6 +935,55 @@ def normalize_question_payload(data: dict):
         "parent_id": parent_id,
         "trigger_value": trigger_value
     }
+
+def normalize_trigger_values(raw_trigger, fallback_value=None):
+    """
+    Normalize trigger input into a de-duplicated list of strings.
+    Accepts: string, list, number, or None.
+    """
+    candidates = []
+
+    if isinstance(raw_trigger, list):
+        candidates = raw_trigger
+    elif raw_trigger is None:
+        if isinstance(fallback_value, list):
+            candidates = fallback_value
+        elif fallback_value is not None:
+            candidates = [fallback_value]
+    else:
+        candidates = [raw_trigger]
+
+    values = []
+    for item in candidates:
+        if item is None:
+            continue
+        val = str(item).strip()
+        if val:
+            values.append(val)
+
+    # De-duplicate while preserving order
+    seen = set()
+    normalized = []
+    for val in values:
+        if val in seen:
+            continue
+        seen.add(val)
+        normalized.append(val)
+
+    return normalized
+
+def format_question_text_with_trigger(question_text, trigger_value):
+    if question_text is None:
+        return question_text
+    text = str(question_text).strip()
+    if not text or not trigger_value:
+        return text
+    prefix = f"{trigger_value} - "
+    if text.startswith(prefix):
+        return text
+    if " - " in text:
+        text = text.split(" - ", 1)[1].strip()
+    return f"{prefix}{text}"
 
 def build_question_tree(questions):
     """
@@ -3812,10 +3838,18 @@ def admin_bulk_locations(level):
 def admin_create_question():
     try:
         data = json_body()
+        raw_trigger = data.get("trigger_value", None)
         payload = normalize_question_payload(data)
 
         if not payload["section_id"] or not payload["question_text"] or not payload["question_type"]:
             return json_error("section_id, question_text, question_type are required", 400)
+
+        trigger_values = normalize_trigger_values(raw_trigger, payload.get("trigger_value"))
+        # Triggers only apply to child questions
+        if payload["parent_id"] is None:
+            trigger_values = [None]
+        if not trigger_values:
+            trigger_values = [None]
 
         # Next order must be globally unique (questions.uk_question_order)
         next_order = db.session.execute(sql_text("""
@@ -3823,25 +3857,40 @@ def admin_create_question():
             FROM questions
         """)).mappings().fetchone()["next_order"]
 
-        db.session.execute(sql_text("""
-            INSERT INTO questions
-            (question_section_id, question_text, question_type, answer_type, options, parent_id, trigger_value, question_order)
-            VALUES
-            (:sid, :qt, :qtype, :atype, :opts, :pid, :tval, :ord)
-        """), {
-            "sid": payload["section_id"],
-            "qt": payload["question_text"],
-            "qtype": payload["question_type"],
-            "atype": payload["answer_type"],
-            "opts": payload["options"],
-            "pid": payload["parent_id"],
-            "tval": payload["trigger_value"],
-            "ord": next_order
-        })
+        question_ids = []
+        orders = []
+        for idx, tval in enumerate(trigger_values):
+            qt_val = payload["question_text"]
+            if payload["parent_id"] is not None and tval:
+                qt_val = format_question_text_with_trigger(qt_val, tval)
+            order_val = next_order + idx
+            db.session.execute(sql_text("""
+                INSERT INTO questions
+                (question_section_id, question_text, question_type, answer_type, options, parent_id, trigger_value, question_order)
+                VALUES
+                (:sid, :qt, :qtype, :atype, :opts, :pid, :tval, :ord)
+            """), {
+                "sid": payload["section_id"],
+                "qt": qt_val,
+                "qtype": payload["question_type"],
+                "atype": payload["answer_type"],
+                "opts": payload["options"],
+                "pid": payload["parent_id"],
+                "tval": tval,
+                "ord": order_val
+            })
+            new_id = db.session.execute(sql_text("SELECT LAST_INSERT_ID() AS id")).mappings().fetchone()["id"]
+            question_ids.append(new_id)
+            orders.append(order_val)
 
         db.session.commit()
-        new_id = db.session.execute(sql_text("SELECT LAST_INSERT_ID() AS id")).mappings().fetchone()["id"]
-        return jsonify({"success": True, "question_id": new_id, "question_order": next_order})
+        return jsonify({
+            "success": True,
+            "question_id": question_ids[0],
+            "question_ids": question_ids,
+            "question_order": orders[0],
+            "question_orders": orders
+        })
 
     except Exception as e:
         db.session.rollback()
@@ -3854,35 +3903,57 @@ def admin_create_question():
 def admin_create_individual_question():
     try:
         data = json_body()
+        raw_trigger = data.get("trigger_value", None)
         payload = normalize_question_payload(data)
 
         if not payload["section_id"] or not payload["question_text"] or not payload["question_type"]:
             return json_error("section_id, question_text, question_type are required", 400)
+
+        trigger_values = normalize_trigger_values(raw_trigger, payload.get("trigger_value"))
+        if payload["parent_id"] is None:
+            trigger_values = [None]
+        if not trigger_values:
+            trigger_values = [None]
 
         next_order = db.session.execute(sql_text("""
             SELECT COALESCE(MAX(question_order), 0) + 1 AS next_order
             FROM individual_questions
         """)).mappings().fetchone()["next_order"]
 
-        db.session.execute(sql_text("""
-            INSERT INTO individual_questions
-            (question_section_id, question_text, question_type, answer_type, options, parent_id, trigger_value, question_order)
-            VALUES
-            (:sid, :qt, :qtype, :atype, :opts, :pid, :tval, :ord)
-        """), {
-            "sid": payload["section_id"],
-            "qt": payload["question_text"],
-            "qtype": payload["question_type"],
-            "atype": payload["answer_type"],
-            "opts": payload["options"],
-            "pid": payload["parent_id"],
-            "tval": payload["trigger_value"],
-            "ord": next_order
-        })
+        question_ids = []
+        orders = []
+        for idx, tval in enumerate(trigger_values):
+            qt_val = payload["question_text"]
+            if payload["parent_id"] is not None and tval:
+                qt_val = format_question_text_with_trigger(qt_val, tval)
+            order_val = next_order + idx
+            db.session.execute(sql_text("""
+                INSERT INTO individual_questions
+                (question_section_id, question_text, question_type, answer_type, options, parent_id, trigger_value, question_order)
+                VALUES
+                (:sid, :qt, :qtype, :atype, :opts, :pid, :tval, :ord)
+            """), {
+                "sid": payload["section_id"],
+                "qt": qt_val,
+                "qtype": payload["question_type"],
+                "atype": payload["answer_type"],
+                "opts": payload["options"],
+                "pid": payload["parent_id"],
+                "tval": tval,
+                "ord": order_val
+            })
+            new_id = db.session.execute(sql_text("SELECT LAST_INSERT_ID() AS id")).mappings().fetchone()["id"]
+            question_ids.append(new_id)
+            orders.append(order_val)
 
         db.session.commit()
-        new_id = db.session.execute(sql_text("SELECT LAST_INSERT_ID() AS id")).mappings().fetchone()["id"]
-        return jsonify({"success": True, "question_id": new_id, "question_order": next_order})
+        return jsonify({
+            "success": True,
+            "question_id": question_ids[0],
+            "question_ids": question_ids,
+            "question_order": orders[0],
+            "question_orders": orders
+        })
 
     except Exception as e:
         db.session.rollback()
@@ -3899,6 +3970,10 @@ def admin_update_question(question_id):
         if not payload["section_id"] or not payload["question_text"] or not payload["question_type"]:
             return json_error("section_id, question_text, question_type are required", 400)
 
+        qt_val = payload["question_text"]
+        if payload["parent_id"] is not None and payload["trigger_value"]:
+            qt_val = format_question_text_with_trigger(qt_val, payload["trigger_value"])
+
         db.session.execute(sql_text("""
             UPDATE questions
             SET question_section_id = :sid,
@@ -3911,7 +3986,7 @@ def admin_update_question(question_id):
             WHERE question_id = :id
         """), {
             "sid": payload["section_id"],
-            "qt": payload["question_text"],
+            "qt": qt_val,
             "qtype": payload["question_type"],
             "atype": payload["answer_type"],
             "opts": payload["options"],
@@ -3937,6 +4012,10 @@ def admin_update_individual_question(question_id):
         if not payload["section_id"] or not payload["question_text"] or not payload["question_type"]:
             return json_error("section_id, question_text, question_type are required", 400)
 
+        qt_val = payload["question_text"]
+        if payload["parent_id"] is not None and payload["trigger_value"]:
+            qt_val = format_question_text_with_trigger(qt_val, payload["trigger_value"])
+
         db.session.execute(sql_text("""
             UPDATE individual_questions
             SET question_section_id = :sid,
@@ -3949,7 +4028,7 @@ def admin_update_individual_question(question_id):
             WHERE question_id = :id
         """), {
             "sid": payload["section_id"],
-            "qt": payload["question_text"],
+            "qt": qt_val,
             "qtype": payload["question_type"],
             "atype": payload["answer_type"],
             "opts": payload["options"],

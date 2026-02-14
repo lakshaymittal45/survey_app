@@ -1,11 +1,11 @@
 -- Full schema for the survey application (generated)
 -- Creates database, tables, relationships, constraints, and triggers used by the app.
 
-CREATE DATABASE IF NOT EXISTS railway
+CREATE DATABASE IF NOT EXISTS survey_1
   CHARACTER SET utf8mb4
   COLLATE utf8mb4_0900_ai_ci;
 
-USE railway;
+USE survey_1;
 
 -- ==========================================================
 -- CORE AUTH TABLES
@@ -13,7 +13,6 @@ USE railway;
 CREATE TABLE IF NOT EXISTS users (
   user_id INT NOT NULL AUTO_INCREMENT,
   username VARCHAR(255) NOT NULL,
-  password VARCHAR(255) NOT NULL,
   password_hash VARCHAR(255) NOT NULL,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (user_id),
@@ -118,6 +117,21 @@ CREATE TABLE IF NOT EXISTS villages (
   CONSTRAINT fk_village_subcenter
     FOREIGN KEY (sub_center_id) REFERENCES sub_centers(sub_center_id)
     ON DELETE CASCADE ON UPDATE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+CREATE TABLE IF NOT EXISTS household_registry (
+  registry_id INT NOT NULL AUTO_INCREMENT,
+  household_code VARCHAR(255) NOT NULL,
+  code_ci VARCHAR(255) GENERATED ALWAYS AS (LOWER(household_code)) STORED,
+  village_id INT NOT NULL,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (registry_id),
+  UNIQUE KEY uk_household_registry_code_ci (code_ci),
+  INDEX idx_household_registry_village (village_id),
+  CONSTRAINT fk_household_registry_village
+    FOREIGN KEY (village_id) REFERENCES villages(village_id)
+    ON DELETE RESTRICT ON UPDATE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 CREATE TABLE IF NOT EXISTS households (
@@ -263,21 +277,6 @@ CREATE TABLE IF NOT EXISTS main_questionnaire_responses (
     ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
-CREATE TABLE IF NOT EXISTS household_registry (
-  registry_id INT NOT NULL AUTO_INCREMENT,
-  household_code VARCHAR(255) NOT NULL,
-  code_ci VARCHAR(255) GENERATED ALWAYS AS (LOWER(household_code)) STORED,
-  village_id INT NOT NULL,
-  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-  PRIMARY KEY (registry_id),
-  UNIQUE KEY uk_household_registry_code_ci (code_ci),
-  INDEX idx_household_registry_village (village_id),
-  CONSTRAINT fk_household_registry_village
-    FOREIGN KEY (village_id) REFERENCES villages(village_id)
-    ON DELETE RESTRICT ON UPDATE CASCADE
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
-
 CREATE TABLE IF NOT EXISTS individual_questionnaire_responses (
   individual_questionnaire_id BIGINT NOT NULL AUTO_INCREMENT,
   responses JSON NOT NULL,
@@ -363,29 +362,6 @@ CREATE TABLE IF NOT EXISTS survey_attempts (
     ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
-CREATE TABLE survey_contributors (
-  contributor_id INT AUTO_INCREMENT PRIMARY KEY,
-
-  main_questionnaire_id BIGINT NOT NULL,
-  user_id INT NOT NULL,
-
-  contributed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-
-  INDEX idx_contrib_mq (main_questionnaire_id),
-  INDEX idx_contrib_user (user_id),
-  INDEX idx_contrib_time (contributed_at),
-
-  CONSTRAINT fk_contrib_mq
-    FOREIGN KEY (main_questionnaire_id)
-    REFERENCES main_questionnaire_responses(main_questionnaire_id)
-    ON DELETE CASCADE,
-
-  CONSTRAINT fk_contrib_user
-    FOREIGN KEY (user_id)
-    REFERENCES users(user_id)
-    ON DELETE CASCADE
-);
-
 -- ==========================================================
 -- TRIGGERS (UPPERCASE NORMALIZATION)
 -- ==========================================================
@@ -441,4 +417,3 @@ CREATE TRIGGER trg_household_update BEFORE UPDATE ON households
 FOR EACH ROW SET NEW.name = UPPER(NEW.name) //
 
 DELIMITER ;
-

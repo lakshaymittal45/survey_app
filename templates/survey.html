@@ -1,3 +1,4 @@
+
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -688,7 +689,15 @@ function renderQuestion(q, isChild = false) {
 
   if (isChild) wrap.dataset.trigger = q.trigger_value;
 
-  wrap.innerHTML = `<p class="font-bold text-slate-800 text-lg leading-tight mb-4">${q.question_text}</p>`;
+  let displayText = q.question_text;
+  if (isChild && q.trigger_value) {
+    const prefix = `${q.trigger_value} - `;
+    if (!String(q.question_text || '').startsWith(prefix)) {
+      displayText = `${q.trigger_value} - ${q.question_text}`;
+    }
+  }
+
+  wrap.innerHTML = `<p class="font-bold text-slate-800 text-lg leading-tight mb-4">${displayText}</p>`;
 
   let opts = [];
   if (q.options) {
@@ -1214,7 +1223,15 @@ function renderIndividualQuestion(q, isChild = false) {
 
   if (isChild) wrap.dataset.trigger = q.trigger_value;
 
-  wrap.innerHTML = `<p class="font-bold text-slate-800 text-lg leading-tight mb-4">${q.question_text}</p>`;
+  let displayText = q.question_text;
+  if (isChild && q.trigger_value) {
+    const prefix = `${q.trigger_value} - `;
+    if (!String(q.question_text || '').startsWith(prefix)) {
+      displayText = `${q.trigger_value} - ${q.question_text}`;
+    }
+  }
+
+  wrap.innerHTML = `<p class="font-bold text-slate-800 text-lg leading-tight mb-4">${displayText}</p>`;
 
   let opts = [];
   if (q.options) {
