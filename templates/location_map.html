@@ -1,0 +1,339 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Survey Locations Map</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background: #f5f7fa;
+        }
+        
+        .header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 20px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        
+        .header-content h1 {
+            font-size: 24px;
+            margin-bottom: 5px;
+        }
+        
+        .header-content p {
+            opacity: 0.9;
+            font-size: 14px;
+        }
+        
+        .btn-back {
+            background: rgba(255, 255, 255, 0.2);
+            color: white;
+            padding: 10px 20px;
+            border-radius: 6px;
+            text-decoration: none;
+            font-weight: 600;
+            transition: all 0.3s;
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+        }
+        
+        .btn-back:hover {
+            background: rgba(255, 255, 255, 0.3);
+            transform: translateY(-2px);
+        }
+        
+        #map {
+            height: calc(100vh - 100px);
+            width: 100%;
+        }
+        
+        .map-controls {
+            position: absolute;
+            top: 90px;
+            right: 10px;
+            z-index: 1000;
+            background: white;
+            padding: 15px;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        
+        .map-controls h3 {
+            margin-bottom: 10px;
+            font-size: 16px;
+            color: #333;
+        }
+        
+        .map-controls button {
+            width: 100%;
+            padding: 10px;
+            margin-bottom: 8px;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            font-weight: 600;
+            transition: all 0.3s;
+        }
+        
+        .btn-satellite {
+            background: #10b981;
+            color: white;
+        }
+        
+        .btn-street {
+            background: #3b82f6;
+            color: white;
+        }
+        
+        .btn-refresh {
+            background: #8b5cf6;
+            color: white;
+        }
+        
+        .map-controls button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+        }
+        
+        .stats {
+            margin-top: 15px;
+            padding-top: 15px;
+            border-top: 1px solid #e5e7eb;
+        }
+        
+        .stat-item {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 8px;
+            font-size: 14px;
+        }
+        
+        .stat-label {
+            color: #6b7280;
+        }
+        
+        .stat-value {
+            font-weight: 600;
+            color: #111827;
+        }
+        
+        .leaflet-popup-content {
+            margin: 15px;
+        }
+        
+        .popup-content h3 {
+            margin-bottom: 10px;
+            color: #667eea;
+        }
+        
+        .popup-content p {
+            margin: 5px 0;
+            font-size: 13px;
+        }
+        
+        .popup-content strong {
+            color: #333;
+        }
+        
+        .household-label {
+            background: white;
+            border: 2px solid #667eea;
+            border-radius: 4px;
+            padding: 2px 6px;
+            font-weight: bold;
+            font-size: 11px;
+            color: #667eea;
+            white-space: nowrap;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.2);
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <div class="header-content">
+            <h1>📍 Survey Locations Map</h1>
+            <p>Live tracking of household survey locations</p>
+        </div>
+        <a href="/admin-dashboard" class="btn-back">← Back to Admin Dashboard</a>
+    </div>
+    
+    <div class="map-controls">
+        <h3>Map Controls</h3>
+        <button class="btn-satellite" onclick="setSatelliteView()">🛰️ Satellite View</button>
+        <button class="btn-street" onclick="setStreetView()">🗺️ Street View</button>
+        <button class="btn-refresh" onclick="refreshLocations()">🔄 Refresh Data</button>
+        
+        <div class="stats">
+            <div class="stat-item">
+                <span class="stat-label">Total Households:</span>
+                <span class="stat-value" id="totalCount">0</span>
+            </div>
+            <div class="stat-item">
+                <span class="stat-label">With Locations:</span>
+                <span class="stat-value" id="locationCount">0</span>
+            </div>
+            <div class="stat-item">
+                <span class="stat-label">Avg Accuracy:</span>
+                <span class="stat-value" id="avgAccuracy">0m</span>
+            </div>
+        </div>
+    </div>
+    
+    <div id="map"></div>
+    
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script>
+        let map;
+        let markers = [];
+        let satelliteLayer;
+        let streetLayer;
+        
+        // Initialize map
+        function initMap() {
+            // Center on India by default
+            map = L.map('map').setView([20.5937, 78.9629], 5);
+            
+            // Street map layer (OpenStreetMap)
+            streetLayer = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+                attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
+                maxZoom: 19
+            }).addTo(map);
+            
+            // Satellite layer (ESRI World Imagery)
+            satelliteLayer = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
+                attribution: 'Tiles &copy; Esri &mdash; Source: Esri, i-cubed, USDA, USGS, AEX, GeoEye, Getmapping, Aerogrid, IGN, IGP, UPR-EGP, and the GIS User Community',
+                maxZoom: 19
+            });
+            
+            loadLocations();
+        }
+        
+        async function loadLocations() {
+            try {
+                const response = await fetch('/api/admin/household-locations');
+                const data = await response.json();
+                
+                if (!data.success) {
+                    alert('Failed to load locations: ' + (data.error || 'Unknown error'));
+                    return;
+                }
+                
+                const households = data.households;
+                
+                // Clear existing markers
+                markers.forEach(marker => map.removeLayer(marker));
+                markers = [];
+                
+                // Update stats
+                document.getElementById('totalCount').textContent = households.length;
+                
+                let locationCount = 0;
+                let totalAccuracy = 0;
+                let bounds = [];
+                
+                households.forEach(household => {
+                    if (household.latitude && household.longitude) {
+                        locationCount++;
+                        
+                        // Create marker
+                        const marker = L.marker([household.latitude, household.longitude])
+                            .addTo(map)
+                            .bindPopup(createPopupContent(household));
+                        
+                        // Add household name label on marker
+                        const icon = L.divIcon({
+                            className: 'household-label',
+                            html: `${household.name}`,
+                            iconSize: [60, 20],
+                            iconAnchor: [30, 30]
+                        });
+                        
+                        L.marker([household.latitude, household.longitude], { icon: icon })
+                            .addTo(map);
+                        
+                        markers.push(marker);
+                        bounds.push([household.latitude, household.longitude]);
+                        
+                        if (household.location_accuracy) {
+                            totalAccuracy += household.location_accuracy;
+                        }
+                    }
+                });
+                
+                document.getElementById('locationCount').textContent = locationCount;
+                
+                if (locationCount > 0) {
+                    const avgAcc = (totalAccuracy / locationCount).toFixed(1);
+                    document.getElementById('avgAccuracy').textContent = avgAcc + 'm';
+                    
+                    // Fit map to show all markers
+                    if (bounds.length > 0) {
+                        map.fitBounds(bounds, { padding: [50, 50] });
+                    }
+                } else {
+                    document.getElementById('avgAccuracy').textContent = 'N/A';
+                }
+                
+            } catch (error) {
+                console.error('Error loading locations:', error);
+                alert('Error loading locations: ' + error.message);
+            }
+        }
+        
+        function createPopupContent(household) {
+            const updatedAt = household.location_updated_at 
+                ? new Date(household.location_updated_at).toLocaleString() 
+                : 'N/A';
+            
+            return `
+                <div class="popup-content">
+                    <h3>🏠 ${household.name || 'Household #' + household.household_id}</h3>
+                    <p><strong>ID:</strong> ${household.household_id}</p>
+                    <p><strong>Village:</strong> ${household.village_name || 'N/A'}</p>
+                    <p><strong>Block:</strong> ${household.block_name || 'N/A'}</p>
+                    <p><strong>District:</strong> ${household.district_name || 'N/A'}</p>
+                    <p><strong>📍 Coordinates:</strong></p>
+                    <p style="margin-left: 15px;">Lat: ${household.latitude?.toFixed(6)}</p>
+                    <p style="margin-left: 15px;">Lng: ${household.longitude?.toFixed(6)}</p>
+                    <p><strong>🎯 Accuracy:</strong> ${household.location_accuracy?.toFixed(1) || 'N/A'}m</p>
+                    <p><strong>🕒 Updated:</strong> ${updatedAt}</p>
+                    <p><strong>👤 Surveyor:</strong> ${household.username || 'N/A'}</p>
+                </div>
+            `;
+        }
+        
+        function setSatelliteView() {
+            map.removeLayer(streetLayer);
+            satelliteLayer.addTo(map);
+        }
+        
+        function setStreetView() {
+            map.removeLayer(satelliteLayer);
+            streetLayer.addTo(map);
+        }
+        
+        function refreshLocations() {
+            loadLocations();
+        }
+        
+        // Initialize on load
+        initMap();
+        
+        // Auto-refresh every 30 seconds
+        setInterval(refreshLocations, 30000);
+    </script>
+</body>
+</html>

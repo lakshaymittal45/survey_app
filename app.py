@@ -1085,6 +1085,22 @@ def admin_dashboard():
     return render_template("admin_dashboard.html")
 
 
+@app.route("/location-map")
+@role_required("admin")
+def location_map():
+    """Display map of household survey locations"""
+    return render_template("location_map.html")
+
+
+@app.route("/mark-location")
+@role_required("user")
+def mark_location():
+    """User marks exact household location on map"""
+    if "household_id" not in session:
+        return redirect(url_for("user_dashboard"))
+    return render_template("mark_location.html")
+
+
 @app.route("/questionnaire")
 @role_required("user")
 def questionnaire():
@@ -1115,6 +1131,50 @@ def get_current_household():
         "household_id": session.get("household_id"),
         "main_questionnaire_id": session.get("main_questionnaire_id")
     })
+
+
+@app.route("/api/save-household-location", methods=["POST"])
+@role_required("user")
+def save_household_location():
+    """Save GPS coordinates for household marked by user"""
+    if "household_id" not in session:
+        return json_error("No household selected", 401)
+    
+    try:
+        data = json_body()
+        household_id = session["household_id"]
+        latitude = data.get("latitude")
+        longitude = data.get("longitude")
+        location_accuracy = data.get("location_accuracy")
+        
+        if latitude is None or longitude is None:
+            return json_error("Latitude and longitude are required", 400)
+        
+        # Update household location
+        db.session.execute(sql_text("""
+            UPDATE households 
+            SET latitude = :lat, 
+                longitude = :lng,
+                location_accuracy = :acc,
+                location_updated_at = NOW()
+            WHERE household_id = :hid
+        """), {
+            "lat": latitude,
+            "lng": longitude,
+            "acc": location_accuracy,
+            "hid": household_id
+        })
+        
+        db.session.commit()
+        
+        return jsonify({
+            "success": True,
+            "message": "Location saved successfully"
+        })
+    
+    except Exception as e:
+        db.session.rollback()
+        return json_error(str(e), 500)
 
 
 @app.route("/api/household-draft")
@@ -1619,6 +1679,11 @@ def save_responses():
             return json_error("section_id is required", 400)
         responses = data.get("responses", {})
         timestamp = data.get("timestamp", datetime.now().isoformat())
+        
+        # 🌍 Get location data if provided
+        latitude = data.get("latitude")
+        longitude = data.get("longitude")
+        location_accuracy = data.get("location_accuracy")
 
         household = db.session.execute(
             sql_text("SELECT household_id FROM households WHERE household_id=:hid"),
@@ -1627,6 +1692,22 @@ def save_responses():
 
         if not household:
             return json_error("Household not found", 404)
+        
+        # 🌍 Update household location if coordinates provided
+        if latitude is not None and longitude is not None:
+            db.session.execute(sql_text("""
+                UPDATE households 
+                SET latitude = :lat, 
+                    longitude = :lng,
+                    location_accuracy = :acc,
+                    location_updated_at = NOW()
+                WHERE household_id = :hid
+            """), {
+                "lat": latitude,
+                "lng": longitude,
+                "acc": location_accuracy,
+                "hid": household_id
+            })
 
         row = db.session.execute(sql_text("""
             SELECT draft_id, user_id, response_data
@@ -2324,6 +2405,64 @@ def admin_get_all_households():
         return jsonify([dict(r) for r in rows])
     except Exception as e:
         return json_error(str(e), 500)
+
+
+@app.route("/api/admin/household-locations")
+@role_required("admin")
+def admin_get_household_locations():
+    """Get all households with GPS coordinates for map display"""
+    try:
+        query = sql_text("""
+            SELECT
+                h.household_id,
+                h.name,
+                h.latitude,
+                h.longitude,
+                h.location_accuracy,
+                h.location_updated_at,
+                s.name AS state_name,
+                d.name AS district_name,
+                b.name AS block_name,
+                sc.name AS sub_center_name,
+                v.name AS village_name,
+                u.username
+            FROM households h
+            LEFT JOIN states s ON h.state_id = s.state_id
+            LEFT JOIN districts d ON h.district_id = d.district_id
+            LEFT JOIN blocks b ON h.block_id = b.block_id
+            LEFT JOIN sub_centers sc ON h.sub_center_id = sc.sub_center_id
+            LEFT JOIN villages v ON h.village_id = v.village_id
+            LEFT JOIN users u ON h.user_id = u.user_id
+            ORDER BY h.household_id DESC
+        """)
+        
+        rows = db.session.execute(query).mappings().all()
+        households = []
+        
+        for row in rows:
+            household = {
+                "household_id": row["household_id"],
+                "name": row["name"],
+                "latitude": float(row["latitude"]) if row["latitude"] else None,
+                "longitude": float(row["longitude"]) if row["longitude"] else None,
+                "location_accuracy": float(row["location_accuracy"]) if row["location_accuracy"] else None,
+                "location_updated_at": row["location_updated_at"].isoformat() if row["location_updated_at"] else None,
+                "state_name": row["state_name"],
+                "district_name": row["district_name"],
+                "block_name": row["block_name"],
+                "sub_center_name": row["sub_center_name"],
+                "village_name": row["village_name"],
+                "username": row["username"]
+            }
+            households.append(household)
+        
+        return jsonify({
+            "success": True,
+            "households": households
+        })
+    except Exception as e:
+        return json_error(str(e), 500)
+
 
 @app.route("/api/admin/households/filter")
 @role_required("admin")

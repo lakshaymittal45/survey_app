@@ -423,7 +423,7 @@
                 </div>
 
                 <button type="submit" class="btn btn-primary" id="submitBtn">
-                    Create Household & Start Survey
+                    Create Household & Mark Location
                 </button>
             </form>
         </div>
@@ -849,23 +849,23 @@
 
                 if (response.ok && result.success) {
                     const msg = result.resumed
-                        ? 'Household resumed! Redirecting to survey...'
-                        : 'Household created successfully! Redirecting to survey...';
+                        ? 'Household resumed! Redirecting to mark location...'
+                        : 'Household created! Please mark the location on the map...';
                     showMessage(msg, 'success');
                     clearDraft();
                     try { localStorage.removeItem('survey_draft_v1'); } catch (e) {}
                     setTimeout(() => {
-                        window.location.href = '/survey';
+                        window.location.href = '/mark-location';
                     }, 1500);
                 } else {
                     showMessage(result.error || 'Failed to create household', 'error');
                     submitBtn.disabled = false;
-                    submitBtn.innerHTML = 'Create Household & Start Survey';
+                    submitBtn.innerHTML = 'Create Household & Mark Location';
                 }
             } catch (error) {
                 showMessage('Error: ' + error.message, 'error');
                 submitBtn.disabled = false;
-                submitBtn.innerHTML = 'Create Household & Start Survey';
+                submitBtn.innerHTML = 'Create Household & Mark Location';
             }
         });
 

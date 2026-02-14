@@ -3,6 +3,7 @@
 let questionnaireData = null;
 let currentResponses = {};
 let currentSectionIndex = 0;
+let currentLocation = null; // 🌍 Store GPS location
 
 // ==================== DOM ELEMENTS ====================
 
@@ -22,7 +23,87 @@ document.addEventListener('DOMContentLoaded', async () => {
     await loadQuestionnaireData();
     displayCurrentSection();
     setupNavigation();
+    requestLocationPermission(); // 🌍 Start GPS tracking
 });
+
+// ==================== GPS LOCATION TRACKING ====================
+
+function requestLocationPermission() {
+    if ("geolocation" in navigator) {
+        // Get current position
+        navigator.geolocation.getCurrentPosition(
+            (position) => {
+                currentLocation = {
+                    latitude: position.coords.latitude,
+                    longitude: position.coords.longitude,
+                    accuracy: position.coords.accuracy
+                };
+                console.log("📍 Location captured:", currentLocation);
+                showLocationStatus(true);
+            },
+            (error) => {
+                console.error("Location error:", error);
+                showLocationStatus(false, error.message);
+            },
+            {
+                enableHighAccuracy: true,
+                timeout: 10000,
+                maximumAge: 60000
+            }
+        );
+        
+        // Watch position for continuous updates
+        navigator.geolocation.watchPosition(
+            (position) => {
+                currentLocation = {
+                    latitude: position.coords.latitude,
+                    longitude: position.coords.longitude,
+                    accuracy: position.coords.accuracy
+                };
+                console.log("📍 Location updated:", currentLocation);
+            },
+            null,
+            {
+                enableHighAccuracy: true,
+                maximumAge: 30000
+            }
+        );
+    } else {
+        console.warn("Geolocation not supported");
+        showLocationStatus(false, "GPS not supported");
+    }
+}
+
+function showLocationStatus(success, errorMsg = "") {
+    // Create or update location indicator
+    let locationIndicator = document.getElementById('locationIndicator');
+    if (!locationIndicator) {
+        locationIndicator = document.createElement('div');
+        locationIndicator.id = 'locationIndicator';
+        locationIndicator.style.cssText = `
+            position: fixed;
+            bottom: 20px;
+            right: 20px;
+            padding: 10px 15px;
+            border-radius: 20px;
+            font-size: 12px;
+            font-weight: 600;
+            z-index: 1000;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.2);
+        `;
+        document.body.appendChild(locationIndicator);
+    }
+    
+    if (success) {
+        locationIndicator.style.background = '#10b981';
+        locationIndicator.style.color = 'white';
+        locationIndicator.innerHTML = '📍 Location Active';
+    } else {
+        locationIndicator.style.background = '#ef4444';
+        locationIndicator.style.color = 'white';
+        locationIndicator.innerHTML = `⚠️ ${errorMsg || 'Location Unavailable'}`;
+    }
+}
 
 // ==================== LOAD QUESTIONNAIRE DATA ====================
 
@@ -268,14 +349,23 @@ function updateProgress() {
 async function saveProgress() {
     // Auto-save responses in the background
     try {
+        const payload = {
+            responses: currentResponses
+        };
+        
+        // 🌍 Add location data if available
+        if (currentLocation) {
+            payload.latitude = currentLocation.latitude;
+            payload.longitude = currentLocation.longitude;
+            payload.location_accuracy = currentLocation.accuracy;
+        }
+        
         const response = await fetch('/api/save_responses', {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json'
             },
-            body: JSON.stringify({
-                responses: currentResponses
-            })
+            body: JSON.stringify(payload)
         });
         
         if (!response.ok) {
@@ -297,14 +387,23 @@ async function submitQuestionnaire() {
         submitBtn.disabled = true;
         submitBtn.innerHTML = '<span class="loading-spinner"></span>Submitting...';
         
+        const payload = {
+            responses: currentResponses
+        };
+        
+        // 🌍 Add location data if available
+        if (currentLocation) {
+            payload.latitude = currentLocation.latitude;
+            payload.longitude = currentLocation.longitude;
+            payload.location_accuracy = currentLocation.accuracy;
+        }
+        
         const response = await fetch('/api/save_responses', {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json'
             },
-            body: JSON.stringify({
-                responses: currentResponses
-            })
+            body: JSON.stringify(payload)
         });
         
         const result = await response.json();
