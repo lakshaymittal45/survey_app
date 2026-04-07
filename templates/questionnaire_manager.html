@@ -130,6 +130,13 @@
                                     <input type="text" id="options" class="w-full bg-white border border-slate-200 rounded-xl p-3 focus:ring-2 focus:ring-blue-500 outline-none transition-all placeholder:text-slate-300" placeholder="Option A, Option B">
                                 </div>
                             </div>
+
+                            <div class="space-y-1.5">
+                                <label class="inline-flex items-center gap-2 text-sm font-semibold text-slate-700 cursor-pointer">
+                                    <input type="checkbox" id="is_mandatory" class="h-4 w-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500">
+                                    Mark this question as mandatory
+                                </label>
+                            </div>
                         </div>
 
                         <button type="submit" class="w-full bg-slate-900 hover:bg-blue-600 text-white font-bold py-4 rounded-xl shadow-lg shadow-slate-200 transition-all active:scale-[0.98] mt-4">
@@ -176,12 +183,14 @@
         function formatQuestionLabel(node) {
             const text = String(node.question_text || "").trim();
             const trigger = String(node.trigger_value || "").trim();
+            const mandatorySuffix = Number(node.is_mandatory) === 1 ? " *" : "";
             if (trigger) {
                 const prefix = `${trigger} - `;
-                if (text.startsWith(prefix)) return text;
-                return text ? `${prefix}${text}` : trigger;
+                if (text.startsWith(prefix)) return `${text}${mandatorySuffix}`;
+                const base = text ? `${prefix}${text}` : trigger;
+                return `${base}${mandatorySuffix}`;
             }
-            return text;
+            return `${text}${mandatorySuffix}`;
         }
 
         function readTriggerValues() {
@@ -286,6 +295,7 @@
                     if (typeof opts === 'string') {
                         try { opts = JSON.parse(opts); } catch(e) { opts = []; }
                     }
+                    const isMandatory = Number(node.is_mandatory) === 1;
 
                     html += `
                         <li class="relative ml-16 tree-line">
@@ -293,6 +303,7 @@
                                 <div class="flex items-center justify-between mb-2">
                                     <div class="flex items-center gap-2">
                                         <span class="text-[10px] font-bold bg-slate-900 text-white px-2 py-0.5 rounded uppercase tracking-tighter">${node.question_type}</span>
+                                        ${isMandatory ? `<span class="text-[10px] font-bold bg-rose-50 text-rose-700 px-2 py-0.5 rounded border border-rose-200">MANDATORY</span>` : ''}
                                         ${node.trigger_value ? `<span class="text-[10px] font-bold bg-indigo-50 text-indigo-600 px-2 py-0.5 rounded border border-indigo-100 italic">IF: ${node.trigger_value}</span>` : ''}
                                     </div>
                                     <span class="text-[9px] text-slate-300 font-mono">ID:${node.question_id}</span>
@@ -371,6 +382,7 @@
                 question_text: document.getElementById('question_text').value,
                 question_type: qt,            // UI type
                 answer_type: qt,              // ✅ backend expects this (maps it)
+                is_mandatory: document.getElementById('is_mandatory').checked ? 1 : null,
                 options: document.getElementById('options').value
                     ? document.getElementById('options').value.split(',').map(s => s.trim()).filter(Boolean)
                     : null,
@@ -400,6 +412,7 @@
                 await loadParents();
                 document.getElementById('question_text').value = '';
                 document.getElementById('options').value = '';
+                document.getElementById('is_mandatory').checked = false;
             } catch (err) {
                 alert("Submission failed. Check server and network.");
                 console.error(err);

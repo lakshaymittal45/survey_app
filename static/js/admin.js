@@ -300,11 +300,12 @@ async function loadQuestions() {
         
         let html = '';
         questions.forEach(q => {
+            const questionLabel = `${q.question_text || ''}${Number(q.is_mandatory) === 1 ? ' *' : ''}`;
             html += `
                 <div class="question-item">
                     <div class="question-info">
                         <p><strong>${escapeHtml(q.section_title)}</strong></p>
-                        <p>${escapeHtml(q.question_text)}</p>
+                        <p>${escapeHtml(questionLabel)}</p>
                         <span class="question-type">${q.question_type}</span>
                         <span class="question-type">${q.answer_type}</span>
                     </div>
@@ -1912,10 +1913,11 @@ async function viewHouseholdDetails(householdId) {
             
             responses.forEach(r => {
                 const answer = r.answer_text || r.answer_numerical || 'No answer';
+                const questionLabel = `${r.question_text || ''}${Number(r.is_mandatory) === 1 ? ' *' : ''}`;
                 detailHtml += `
                     <tr>
                         <td>${escapeHtml(r.section_title)}</td>
-                        <td>${escapeHtml(r.question_text)}</td>
+                        <td>${escapeHtml(questionLabel)}</td>
                         <td>${escapeHtml(String(answer))}</td>
                         <td>${r.question_type}</td>
                     </tr>

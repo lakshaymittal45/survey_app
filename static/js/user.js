@@ -195,7 +195,8 @@ function createQuestionElement(question, questionNumber) {
     // Question text
     const questionText = document.createElement('label');
     questionText.className = 'question-label';
-    questionText.innerHTML = `<span class="question-number">${questionNumber}.</span> ${escapeHtml(question.question_text)}`;
+    const mandatoryMark = Number(question.is_mandatory) === 1 ? ' *' : '';
+    questionText.innerHTML = `<span class="question-number">${questionNumber}.</span> ${escapeHtml(`${question.question_text || ''}${mandatoryMark}`)}`;
     questionDiv.appendChild(questionText);
     
     // Get existing answer

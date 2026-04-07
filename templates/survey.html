@@ -17,6 +17,47 @@
     .step-transition { transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1); }
     .q-error { border-color: #fca5a5 !important; box-shadow: 0 0 0 3px rgba(248, 113, 113, 0.2); }
     .q-error-text { color: #ef4444; font-size: 0.85rem; margin-top: 8px; }
+    .member-toolbar { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 14px; }
+    .member-top-btn {
+      border: 1px solid #cbd5e1;
+      background: #f8fafc;
+      color: #1e293b;
+      border-radius: 10px;
+      padding: 8px 12px;
+      font-size: 13px;
+      font-weight: 700;
+      cursor: pointer;
+    }
+    .member-table {
+      width: 100%;
+      border-collapse: collapse;
+      table-layout: auto;
+      min-width: 760px;
+    }
+    .member-table th,
+    .member-table td {
+      padding: 10px 12px;
+      border-bottom: 1px solid #e2e8f0;
+      text-align: left;
+      vertical-align: middle;
+      white-space: nowrap;
+    }
+    .member-table th {
+      color: #334155;
+      font-weight: 800;
+      font-size: 15px;
+    }
+    .member-action-btn {
+      border: 0;
+      border-radius: 8px;
+      padding: 7px 10px;
+      color: #fff;
+      font-size: 12px;
+      font-weight: 700;
+      cursor: pointer;
+    }
+    .member-action-btn.go { background: #2563eb; }
+    .member-action-btn.edit { background: #059669; }
     @media (max-width: 1024px) {
       .child-indent { margin-left: 1.25rem; padding-left: 1rem; }
     }
@@ -87,6 +128,10 @@
             <button id="saveExitBtn" onclick="saveAndExit()"
                     class="px-8 py-3 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold rounded-xl transition-all">
               Save & Exit
+            </button>
+            <button id="skipBtn" onclick="skipSectionForNow()"
+                    class="px-8 py-3 bg-amber-100 hover:bg-amber-200 text-amber-800 font-bold rounded-xl transition-all">
+              Skip For Now
             </button>
             <button id="nextBtn" onclick="saveAndNext()"
                     class="px-10 py-3 bg-blue-600 hover:bg-blue-700 text-white font-bold rounded-xl shadow-lg shadow-blue-100 transition-all transform active:scale-95">
@@ -214,6 +259,8 @@
     <p class="text-slate-600 mb-6">All family members have been saved. What would you like to do next?</p>
     <div class="flex gap-4">
       <button type="button" onclick="showMemberTable()" class="px-8 py-3 bg-blue-600 hover:bg-blue-700 text-white font-bold rounded-xl">Continue to Individual Questionnaire</button>
+      <button type="button" onclick="goToMainQuestions()" class="px-8 py-3 bg-indigo-100 hover:bg-indigo-200 text-indigo-800 font-bold rounded-xl">Modify Main Questions</button>
+      <button type="button" onclick="addMoreMembers()" class="px-8 py-3 bg-emerald-100 hover:bg-emerald-200 text-emerald-800 font-bold rounded-xl">Add More Members</button>
       <button type="button" onclick="saveAndQuitMembers()" class="px-8 py-3 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold rounded-xl">Save & Quit</button>
     </div>
   </div>
@@ -221,8 +268,12 @@
   <!-- MEMBER TABLE -->
   <div id="member-table-layer" class="hidden glass-panel p-8 rounded-3xl shadow-xl">
     <h2 class="text-2xl font-bold mb-6 border-b pb-4">Family Members</h2>
+    <div class="member-toolbar">
+      <button type="button" onclick="goToMainQuestions()" class="member-top-btn px-4 py-2 bg-indigo-100 hover:bg-indigo-200 text-indigo-800 text-sm font-bold rounded-lg">Modify Main Questions</button>
+      <button type="button" onclick="addMoreMembers()" class="member-top-btn px-4 py-2 bg-emerald-100 hover:bg-emerald-200 text-emerald-800 text-sm font-bold rounded-lg">Add More Members</button>
+    </div>
     <div class="overflow-x-auto">
-      <table class="min-w-full text-sm">
+      <table class="member-table min-w-full text-sm">
         <thead>
           <tr class="text-left text-slate-500 border-b">
             <th class="py-3 pr-4">Name</th>
@@ -286,6 +337,10 @@
           </button>
 
           <div class="flex gap-4">
+            <button id="iq_skipBtn" onclick="skipIndividualSectionForNow()"
+                    class="px-8 py-3 bg-amber-100 hover:bg-amber-200 text-amber-800 font-bold rounded-xl transition-all">
+              Skip For Now
+            </button>
             <button id="iq_nextBtn" onclick="saveAndNextIndividual()"
                     class="px-10 py-3 bg-blue-600 hover:bg-blue-700 text-white font-bold rounded-xl shadow-lg shadow-blue-100 transition-all transform active:scale-95">
               Save & Next Section
@@ -344,6 +399,9 @@ let iqResponses = {};
 let activeMemberId = null;
 let currentHouseholdId = null;
 let draftSaveTimer = null;
+let skippedSectionIds = [];
+let iqSkippedSectionIds = [];
+let forceMainStage = false;
 
 function persistSurveyDraft(stage = null) {
   try {
@@ -364,6 +422,7 @@ function persistSurveyDraft(stage = null) {
       household_id: currentHouseholdId,
       stage: stage || getCurrentStage(),
       responses,
+      skippedSectionIds,
       currentIndex,
       currentSectionId,
       members,
@@ -374,6 +433,7 @@ function persistSurveyDraft(stage = null) {
       iqCurrentIndex,
       iqCurrentSectionId,
       iqResponses,
+      iqSkippedSectionIds,
       activeMemberId,
       personalDraft
     };
@@ -420,6 +480,7 @@ function restoreSurveyDraft() {
   }
 
   responses = draft.responses || {};
+  skippedSectionIds = Array.isArray(draft.skippedSectionIds) ? draft.skippedSectionIds : [];
   currentIndex = draft.currentIndex || 0;
   currentSectionId = draft.currentSectionId || null;
   members = Array.isArray(draft.members) ? draft.members : [];
@@ -430,6 +491,7 @@ function restoreSurveyDraft() {
   iqCurrentIndex = draft.iqCurrentIndex || 0;
   iqCurrentSectionId = draft.iqCurrentSectionId || null;
   iqResponses = draft.iqResponses || {};
+  iqSkippedSectionIds = Array.isArray(draft.iqSkippedSectionIds) ? draft.iqSkippedSectionIds : [];
   activeMemberId = draft.activeMemberId || null;
   if (draft.personalDraft) {
     prefillPersonForm(draft.personalDraft);
@@ -444,6 +506,8 @@ function applySurveyState(state) {
   if (typeof state.memberSeq === 'number') memberSeq = state.memberSeq;
   if (state.activeMemberId !== undefined) activeMemberId = state.activeMemberId;
   if (state.iqResponses) iqResponses = state.iqResponses;
+  if (Array.isArray(state.skippedSectionIds)) skippedSectionIds = state.skippedSectionIds;
+  if (Array.isArray(state.iqSkippedSectionIds)) iqSkippedSectionIds = state.iqSkippedSectionIds;
   if (typeof state.iqCurrentIndex === 'number') iqCurrentIndex = state.iqCurrentIndex;
   if (state.iqCurrentSectionId !== undefined) iqCurrentSectionId = state.iqCurrentSectionId;
   if (typeof state.currentIndex === 'number') currentIndex = state.currentIndex;
@@ -466,6 +530,7 @@ async function loadServerDraft() {
 async function applyServerDraft() {
   const data = await loadServerDraft();
   if (!data) return;
+  forceMainStage = !!data.reopened_for_edit;
   if (data.status === 'submitted') {
     alert('Survey is already completed for this household.');
     window.location.href = '/user-dashboard';
@@ -475,14 +540,30 @@ async function applyServerDraft() {
     mainQuestionnaireId = data.main_questionnaire_id;
   }
   const serverResponses = data.responses || {};
+  const surveyState = data.draft && data.draft.survey_state;
   const localDraft = loadSurveyDraft();
+  if (forceMainStage) {
+    try { localStorage.removeItem(SURVEY_DRAFT_KEY); } catch (e) {}
+  }
   if (!localDraft) {
     responses = serverResponses;
-    const surveyState = data.draft && data.draft.survey_state;
     applySurveyState(surveyState);
-    return surveyState?.stage || null;
+    if (!forceMainStage) {
+      return surveyState?.stage || null;
+    }
+    currentIndex = 0;
+    currentSectionId = null;
+    return 'survey-layer';
   }
   responses = { ...serverResponses, ...responses };
+  if (forceMainStage) {
+    applySurveyState(surveyState);
+  }
+  if (forceMainStage) {
+    currentIndex = 0;
+    currentSectionId = null;
+    return 'survey-layer';
+  }
   return null;
 }
 
@@ -512,12 +593,14 @@ function persistServerDraft(payload) {
   if (draftSaveTimer) clearTimeout(draftSaveTimer);
   const survey_state = {
     stage: payload.stage,
+    skippedSectionIds: payload.skippedSectionIds,
     members: payload.members,
     totalMembers: payload.totalMembers,
     currentMemberIndex: payload.currentMemberIndex,
     memberSeq: payload.memberSeq,
     activeMemberId: payload.activeMemberId,
     iqResponses: payload.iqResponses,
+    iqSkippedSectionIds: payload.iqSkippedSectionIds,
     iqCurrentIndex: payload.iqCurrentIndex,
     iqCurrentSectionId: payload.iqCurrentSectionId,
     currentIndex: payload.currentIndex,
@@ -554,7 +637,9 @@ async function initPage() {
     document.getElementById('survey-layer').classList.remove('hidden');
     initSurvey();
     const draft = loadSurveyDraft();
-    if (draft && draft.stage && draft.stage !== 'survey-layer') {
+    if (forceMainStage) {
+      showLayer('survey-layer');
+    } else if (draft && draft.stage && draft.stage !== 'survey-layer') {
       showLayer(draft.stage);
       if (draft.stage === 'member-table-layer') {
         showMemberTable();
@@ -696,6 +781,9 @@ function renderQuestion(q, isChild = false) {
       displayText = `${q.trigger_value} - ${q.question_text}`;
     }
   }
+  if (Number(q.is_mandatory) === 1) {
+    displayText = `${displayText} *`;
+  }
 
   wrap.innerHTML = `<p class="font-bold text-slate-800 text-lg leading-tight mb-4">${displayText}</p>`;
 
@@ -836,11 +924,15 @@ function saveAnswer(qid, val, qtype) {
   }
 }
 
-async function saveCurrentSection() {
+async function saveCurrentSection(isSkipped = false) {
   await fetch(`${API_BASE}/responses`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ section_id: currentSectionId, responses })
+    body: JSON.stringify({
+      section_id: currentSectionId,
+      responses: isSkipped ? {} : responses,
+      is_skipped: !!isSkipped
+    })
   });
 }
 
@@ -854,12 +946,29 @@ function moveSection(direction) {
 
 async function saveAndNext() {
   if (!validateCurrentSection()) return;
+  skippedSectionIds = skippedSectionIds.filter(id => Number(id) !== Number(currentSectionId));
   await saveCurrentSection();
+  persistSurveyDraft('survey-layer');
   moveSection(1);
+}
+
+async function skipSectionForNow() {
+  if (!currentSectionId) return;
+  if (!skippedSectionIds.includes(currentSectionId)) {
+    skippedSectionIds.push(currentSectionId);
+  }
+  await saveCurrentSection(true);
+  persistSurveyDraft('survey-layer');
+  if (currentIndex < sections.length - 1) {
+    moveSection(1);
+  } else {
+    alert('Section marked as skipped for now. Complete all skipped sections before final submit.');
+  }
 }
 
 async function saveAndExit() {
   if (!validateCurrentSection()) return;
+  skippedSectionIds = skippedSectionIds.filter(id => Number(id) !== Number(currentSectionId));
   await saveCurrentSection();
   persistSurveyDraft('survey-layer');
   window.location.href = '/logout';
@@ -867,6 +976,7 @@ async function saveAndExit() {
 
 async function submitSurvey() {
   if (!validateCurrentSection()) return;
+  skippedSectionIds = skippedSectionIds.filter(id => Number(id) !== Number(currentSectionId));
   const householdRes = await fetch(`${API_BASE}/current-household`);
   const householdData = await householdRes.json();
   if (!householdData.household_id) {
@@ -877,11 +987,7 @@ async function submitSurvey() {
   if (!mainQuestionnaireId && householdData.main_questionnaire_id) {
     mainQuestionnaireId = householdData.main_questionnaire_id;
   }
-  await fetch(`${API_BASE}/responses`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ section_id: currentSectionId, responses })
-  });
+  await saveCurrentSection();
 
   try {
     const res = await fetch(`${API_BASE}/main-questionnaire/submit`, {
@@ -891,7 +997,24 @@ async function submitSurvey() {
     });
     const result = await res.json();
     if (!res.ok || !result.success) {
-      alert(result.error || 'Failed to submit main questionnaire.');
+      if (Array.isArray(result.pending_section_ids) && result.pending_section_ids.length > 0) {
+        let detailsText = "";
+        if (result.pending_section_details && typeof result.pending_section_details === 'object') {
+          const lines = result.pending_section_ids.map((sid) => {
+            const info = result.pending_section_details[String(sid)] || {};
+            const missing = Array.isArray(info.missing_mandatory_question_ids)
+              ? info.missing_mandatory_question_ids
+              : [];
+            return `Section ${sid}: missing mandatory question IDs ${missing.length ? missing.join(', ') : '(none)'}`;
+          });
+          if (lines.length) {
+            detailsText = `\n\n${lines.join('\n')}`;
+          }
+        }
+        alert(`Please complete all sections before final submit. Pending sections: ${result.pending_section_ids.join(', ')}${detailsText}`);
+      } else {
+        alert(result.error || 'Failed to submit main questionnaire.');
+      }
       return;
     }
     mainQuestionnaireId = result.main_questionnaire_id;
@@ -902,8 +1025,12 @@ async function submitSurvey() {
   }
 
   document.getElementById('survey-layer').classList.add('hidden');
-  document.getElementById('member-count-layer').classList.remove('hidden');
-  persistSurveyDraft('member-count-layer');
+  if (members && members.length > 0) {
+    showMemberTable();
+  } else {
+    document.getElementById('member-count-layer').classList.remove('hidden');
+    persistSurveyDraft('member-count-layer');
+  }
   window.scrollTo(0,0);
 }
 
@@ -921,6 +1048,11 @@ function validateCurrentSection() {
       el.classList.remove('q-error');
       const existing = el.querySelector('.q-error-text');
       if (existing) existing.remove();
+    }
+
+    // Only mandatory questions should block section submit.
+    if (Number(q.is_mandatory) !== 1) {
+      continue;
     }
 
     const qType = q.question_type;
@@ -1075,8 +1207,8 @@ function showMemberTable() {
     const aadhar = m.aadhar || '';
     const actionBtn = eligible
       ? (completed
-        ? '<span class="px-3 py-1 bg-emerald-50 text-emerald-700 rounded-lg text-xs font-bold">Completed</span>'
-        : `<button class="px-3 py-1 bg-blue-600 text-white rounded-lg text-xs font-bold" onclick="openIndividualQuestionnaire(${memberIndex})">Go to Individual Questionnaire</button>`)
+        ? `<button class="member-action-btn edit px-3 py-1 bg-emerald-600 text-white rounded-lg text-xs font-bold" onclick="openIndividualQuestionnaire(${memberIndex})">Edit Individual Questionnaire</button>`
+        : `<button class="member-action-btn go px-3 py-1 bg-blue-600 text-white rounded-lg text-xs font-bold" onclick="openIndividualQuestionnaire(${memberIndex})">Go to Individual Questionnaire</button>`)
       : '';
     return `
       <tr class="border-b">
@@ -1101,6 +1233,35 @@ function showMemberTable() {
 function saveAndQuitMembers() {
   persistSurveyDraft();
   window.location.href = '/logout';
+}
+
+function goToMainQuestions() {
+  showLayer('survey-layer');
+  const idx = (typeof currentIndex === 'number' && currentIndex >= 0 && currentIndex < sections.length) ? currentIndex : 0;
+  if (sections.length > 0) {
+    loadSection(idx);
+  }
+  persistSurveyDraft('survey-layer');
+  window.scrollTo(0, 0);
+}
+
+function addMoreMembers() {
+  const extraRaw = prompt('How many more members do you want to add?', '1');
+  if (extraRaw === null) return;
+  const extra = parseInt(String(extraRaw).trim(), 10);
+  if (!extra || extra < 1) {
+    alert('Please enter a valid positive number.');
+    return;
+  }
+
+  const existingCount = Array.isArray(members) ? members.length : 0;
+  totalMembers = Math.max(totalMembers || 0, existingCount) + extra;
+  currentMemberIndex = existingCount;
+  showLayer('personal-layer');
+  clearMemberForm();
+  updateMemberProgress();
+  persistSurveyDraft('personal-layer');
+  window.scrollTo(0, 0);
 }
 
 // ------------------------------
@@ -1230,6 +1391,9 @@ function renderIndividualQuestion(q, isChild = false) {
       displayText = `${q.trigger_value} - ${q.question_text}`;
     }
   }
+  if (Number(q.is_mandatory) === 1) {
+    displayText = `${displayText} *`;
+  }
 
   wrap.innerHTML = `<p class="font-bold text-slate-800 text-lg leading-tight mb-4">${displayText}</p>`;
 
@@ -1353,7 +1517,22 @@ function moveIndividualSection(direction) {
 
 async function saveAndNextIndividual() {
   if (!validateIndividualSection()) return;
+  iqSkippedSectionIds = iqSkippedSectionIds.filter(id => Number(id) !== Number(iqCurrentSectionId));
+  persistSurveyDraft('individual-questionnaire-layer');
   moveIndividualSection(1);
+}
+
+function skipIndividualSectionForNow() {
+  if (!iqCurrentSectionId) return;
+  if (!iqSkippedSectionIds.includes(iqCurrentSectionId)) {
+    iqSkippedSectionIds.push(iqCurrentSectionId);
+  }
+  persistSurveyDraft('individual-questionnaire-layer');
+  if (iqCurrentIndex < iqSections.length - 1) {
+    moveIndividualSection(1);
+  } else {
+    alert('Section marked as skipped for now. Complete all skipped sections before final submit.');
+  }
 }
 
 function validateIndividualSection() {
@@ -1370,6 +1549,11 @@ function validateIndividualSection() {
       el.classList.remove('q-error');
       const existing = el.querySelector('.q-error-text');
       if (existing) existing.remove();
+    }
+
+    // Only mandatory questions should block section submit.
+    if (Number(q.is_mandatory) !== 1) {
+      continue;
     }
 
     const qType = q.question_type;
@@ -1424,6 +1608,7 @@ function validateIndividualSection() {
 
 async function submitIndividualQuestionnaire() {
   if (!validateIndividualSection()) return;
+  iqSkippedSectionIds = iqSkippedSectionIds.filter(id => Number(id) !== Number(iqCurrentSectionId));
 
   const member = members.find(m => m.member_id === activeMemberId);
   if (!member) {
@@ -1450,6 +1635,7 @@ async function submitIndividualQuestionnaire() {
     member.individual_completed = true;
     member.individual_questionnaire_id = result.individual_questionnaire_id;
     member.individual_responses = { ...iqResponses };
+    member.skipped_sections = [...iqSkippedSectionIds];
 
     alert('Individual questionnaire submitted successfully.');
     await finalizeSurveyIfComplete();

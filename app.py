@@ -97,6 +97,7 @@ def ensure_questionnaire_tables():
                 section_id INT AUTO_INCREMENT NOT NULL,
                 section_order INT NOT NULL,
                 section_title VARCHAR(255) NOT NULL,
+                show_on_user_end TINYINT(1) NOT NULL DEFAULT 1,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
                 PRIMARY KEY (section_id),
@@ -113,6 +114,7 @@ def ensure_questionnaire_tables():
                 question_text TEXT NOT NULL,
                 question_type VARCHAR(50) NOT NULL,
                 answer_type VARCHAR(20) NOT NULL,
+                is_mandatory TINYINT(1) NULL,
                 options TEXT NULL,
                 parent_id INT NULL,
                 trigger_value VARCHAR(255) NULL,
@@ -140,6 +142,7 @@ def ensure_questionnaire_tables():
                 section_id INT AUTO_INCREMENT NOT NULL,
                 section_order INT NOT NULL,
                 section_title VARCHAR(255) NOT NULL,
+                show_on_user_end TINYINT(1) NOT NULL DEFAULT 1,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
                 PRIMARY KEY (section_id),
@@ -156,6 +159,7 @@ def ensure_questionnaire_tables():
                 question_text TEXT NOT NULL,
                 question_type VARCHAR(50) NOT NULL,
                 answer_type VARCHAR(20) NOT NULL,
+                is_mandatory TINYINT(1) NULL,
                 options TEXT NULL,
                 parent_id INT NULL,
                 trigger_value VARCHAR(255) NULL,
@@ -283,6 +287,14 @@ def ensure_questionnaire_tables():
             db.session.execute(sql_text("ALTER TABLE questions ADD COLUMN parent_id INT NULL"))
         if not _col_exists("questions", "trigger_value"):
             db.session.execute(sql_text("ALTER TABLE questions ADD COLUMN trigger_value VARCHAR(255) NULL"))
+        if not _col_exists("questions", "is_mandatory"):
+            db.session.execute(sql_text("ALTER TABLE questions ADD COLUMN is_mandatory TINYINT(1) NULL"))
+        if not _col_exists("individual_questions", "is_mandatory"):
+            db.session.execute(sql_text("ALTER TABLE individual_questions ADD COLUMN is_mandatory TINYINT(1) NULL"))
+        if not _col_exists("questionnaire_sections", "show_on_user_end"):
+            db.session.execute(sql_text("ALTER TABLE questionnaire_sections ADD COLUMN show_on_user_end TINYINT(1) NOT NULL DEFAULT 1"))
+        if not _col_exists("individual_questionnaire_sections", "show_on_user_end"):
+            db.session.execute(sql_text("ALTER TABLE individual_questionnaire_sections ADD COLUMN show_on_user_end TINYINT(1) NOT NULL DEFAULT 1"))
 
         db.session.commit()
     except Exception:
@@ -415,11 +427,53 @@ def ensure_household_registry_table():
         print("=== ERROR ENSURING HOUSEHOLD REGISTRY TABLE ===")
         print(traceback.format_exc())
 
+
+def ensure_response_history_tables():
+    try:
+        db.session.execute(sql_text("""
+            CREATE TABLE IF NOT EXISTS main_questionnaire_response_history (
+                history_id BIGINT NOT NULL AUTO_INCREMENT,
+                main_questionnaire_id BIGINT NOT NULL,
+                household_id INT NULL,
+                changed_by_user_id INT NULL,
+                changed_by_username VARCHAR(255) NULL,
+                change_action VARCHAR(100) NOT NULL,
+                previous_responses JSON NULL,
+                changed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (history_id),
+                INDEX idx_mqrh_main_id (main_questionnaire_id),
+                INDEX idx_mqrh_household_id (household_id)
+            ) ENGINE=InnoDB;
+        """))
+
+        db.session.execute(sql_text("""
+            CREATE TABLE IF NOT EXISTS household_response_draft_history (
+                history_id BIGINT NOT NULL AUTO_INCREMENT,
+                draft_id BIGINT NULL,
+                household_id INT NOT NULL,
+                changed_by_user_id INT NULL,
+                changed_by_username VARCHAR(255) NULL,
+                change_action VARCHAR(100) NOT NULL,
+                previous_response_data JSON NULL,
+                changed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (history_id),
+                INDEX idx_hrdh_household_id (household_id),
+                INDEX idx_hrdh_draft_id (draft_id)
+            ) ENGINE=InnoDB;
+        """))
+
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+        print("=== ERROR ENSURING RESPONSE HISTORY TABLES ===")
+        print(traceback.format_exc())
+
 with app.app_context():
     ensure_questionnaire_tables()
     ensure_household_name_unique_index()
     ensure_aadhar_storage_columns()
     ensure_household_registry_table()
+    ensure_response_history_tables()
 
 
 # ==========================================================
@@ -454,6 +508,38 @@ def safe_int(val, default=None):
         return default
 
 
+def to_bool_flag(value, default=1):
+    if value is None:
+        return 1 if default else 0
+    if isinstance(value, bool):
+        return 1 if value else 0
+    if isinstance(value, (int, float)):
+        return 1 if int(value) != 0 else 0
+    if isinstance(value, str):
+        v = value.strip().lower()
+        if v in ("1", "true", "yes", "y", "on"):
+            return 1
+        if v in ("0", "false", "no", "n", "off", ""):
+            return 0
+    return 1 if default else 0
+
+
+def _verify_admin_credentials(username, password):
+    uname = (username or "").strip()
+    pwd = password or ""
+    if not uname or not pwd:
+        return None
+    row = db.session.execute(
+        sql_text("SELECT admin_id, password_hash FROM admins WHERE username=:u LIMIT 1"),
+        {"u": uname},
+    ).mappings().fetchone()
+    if not row:
+        return None
+    if check_password_hash(row["password_hash"], pwd):
+        return row["admin_id"]
+    return None
+
+
 def json_error(msg, status=500, details=None):
     payload = {"success": False, "error": msg}
     if details:
@@ -465,13 +551,19 @@ def safe_json_load(val):
     try:
         return json.loads(val) if isinstance(val, str) else val
     except Exception:
-        return val
+        # Treat malformed JSON text as missing payload instead of returning raw text.
+        return None
 
 
 def _extract_status(payload):
     if isinstance(payload, dict):
         return payload.get("status")
     return None
+
+
+def _is_completed_main_status(status):
+    # Legacy and current submission states that represent a completed household form.
+    return str(status or "").strip().lower() in {"submitted", "household_submitted", "fully_completed"}
 
 
 def _combine_draft_sections(draft_payload):
@@ -483,6 +575,287 @@ def _combine_draft_sections(draft_payload):
     return combined
 
 
+def _safe_int_set(values):
+    out = set()
+    for v in values or []:
+        iv = safe_int(v)
+        if iv is not None:
+            out.add(iv)
+    return out
+
+
+def _main_section_ids():
+    rows = db.session.execute(sql_text("""
+        SELECT section_id
+        FROM questionnaire_sections
+        WHERE COALESCE(show_on_user_end, 1) = 1
+        ORDER BY section_order
+    """)).mappings().all()
+    return [int(r["section_id"]) for r in rows]
+
+
+def _section_completion_from_draft(draft_payload, all_section_ids):
+    draft = draft_payload if isinstance(draft_payload, dict) else {}
+    sections_map = draft.get("sections") or {}
+    if not isinstance(sections_map, dict):
+        sections_map = {}
+    survey_state = draft.get("survey_state") or {}
+    if not isinstance(survey_state, dict):
+        survey_state = {}
+
+    completed_ids = set()
+    skipped_ids = set()
+
+    for raw_sid, sec in sections_map.items():
+        sid = safe_int(raw_sid)
+        if sid is None:
+            continue
+        sec_obj = sec if isinstance(sec, dict) else {}
+        is_skipped = bool(sec_obj.get("is_skipped"))
+        if is_skipped:
+            skipped_ids.add(sid)
+        else:
+            completed_ids.add(sid)
+
+    skipped_ids |= _safe_int_set(survey_state.get("skippedSectionIds"))
+    completed_ids -= skipped_ids
+
+    all_ids = set(all_section_ids or [])
+    pending_ids = sorted(all_ids - completed_ids)
+    return {
+        "completed_ids": sorted(completed_ids),
+        "skipped_ids": sorted(skipped_ids),
+        "pending_ids": pending_ids,
+    }
+
+
+def _has_answer_value(value):
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return value.strip() != ""
+    if isinstance(value, (list, tuple, set)):
+        return len(value) > 0
+    return True
+
+
+def _to_value_tokens(value):
+    if value is None:
+        return set()
+    if isinstance(value, (list, tuple, set)):
+        values = value
+    else:
+        values = [value]
+
+    tokens = set()
+    for item in values:
+        if item is None:
+            continue
+        text = str(item).strip()
+        if not text:
+            continue
+        tokens.add(text.lower())
+    return tokens
+
+
+def _question_is_applicable(question_id, question_meta, responses_map, seen=None):
+    if seen is None:
+        seen = set()
+    if question_id in seen:
+        return False
+    seen.add(question_id)
+
+    meta = question_meta.get(question_id) or {}
+    parent_id = safe_int(meta.get("parent_id"))
+    trigger_value = (meta.get("trigger_value") or "").strip()
+
+    # Root question is always applicable.
+    if not parent_id:
+        return True
+
+    # Child can only apply if parent itself applies.
+    if not _question_is_applicable(parent_id, question_meta, responses_map, seen):
+        return False
+
+    parent_val = responses_map.get(str(parent_id))
+    if parent_val is None:
+        parent_val = responses_map.get(parent_id)
+
+    if not _has_answer_value(parent_val):
+        return False
+
+    # If no trigger is configured, treat as applicable once parent has a value.
+    if not trigger_value:
+        return True
+
+    parent_tokens = _to_value_tokens(parent_val)
+    return trigger_value.lower() in parent_tokens
+
+
+def _answered_section_ids_from_responses(all_section_ids, responses_map, include_details=False):
+    if not isinstance(responses_map, dict):
+        return (set(), {}) if include_details else set()
+
+    section_ids = set(all_section_ids or [])
+    if not section_ids:
+        return (set(), {}) if include_details else set()
+
+    rows = db.session.execute(sql_text("""
+        SELECT
+            q.question_section_id AS section_id,
+            q.question_id,
+            q.parent_id,
+            q.trigger_value,
+            COALESCE(q.is_mandatory, 0) AS is_mandatory
+        FROM questions q
+        JOIN questionnaire_sections s ON s.section_id = q.question_section_id
+        WHERE COALESCE(s.show_on_user_end, 1) = 1
+    """)).mappings().all()
+
+    section_questions = {sid: set() for sid in section_ids}
+    section_mandatory_questions = {sid: set() for sid in section_ids}
+    question_meta = {}
+    for r in rows:
+        sid = safe_int(r.get("section_id"))
+        qid = safe_int(r.get("question_id"))
+        if sid in section_questions and qid is not None:
+            section_questions[sid].add(qid)
+            question_meta[qid] = {
+                "parent_id": safe_int(r.get("parent_id")),
+                "trigger_value": r.get("trigger_value"),
+            }
+            if safe_int(r.get("is_mandatory"), 0) == 1:
+                section_mandatory_questions[sid].add(qid)
+
+    completed = set()
+    details = {}
+    for sid, qids in section_questions.items():
+        # Sections without questions should not block submit.
+        if not qids:
+            completed.add(sid)
+            details[sid] = {
+                "applicable_mandatory_question_ids": [],
+                "missing_mandatory_question_ids": [],
+            }
+            continue
+
+        mandatory_qids = section_mandatory_questions.get(sid) or set()
+
+        # If a section has no mandatory questions, it should not block final submit.
+        if not mandatory_qids:
+            completed.add(sid)
+            details[sid] = {
+                "applicable_mandatory_question_ids": [],
+                "missing_mandatory_question_ids": [],
+            }
+            continue
+
+        applicable_mandatory_qids = []
+        missing_mandatory_qids = []
+        for qid in mandatory_qids:
+            # Triggered child mandatory questions should only block when applicable.
+            if not _question_is_applicable(qid, question_meta, responses_map):
+                continue
+
+            applicable_mandatory_qids.append(qid)
+
+            val = responses_map.get(str(qid))
+            if val is None:
+                val = responses_map.get(qid)
+            if not _has_answer_value(val):
+                missing_mandatory_qids.append(qid)
+
+        details[sid] = {
+            "applicable_mandatory_question_ids": sorted(applicable_mandatory_qids),
+            "missing_mandatory_question_ids": sorted(missing_mandatory_qids),
+        }
+
+        if not missing_mandatory_qids:
+            completed.add(sid)
+
+    if include_details:
+        return completed, details
+    return completed
+
+
+def _admin_household_status(main_payload, draft_payload, all_section_ids):
+    main_obj = main_payload if isinstance(main_payload, dict) else {}
+    status = _extract_status(main_obj)
+
+    completion = _section_completion_from_draft(draft_payload, all_section_ids)
+    skipped_count = len(completion["skipped_ids"])
+    pending_count = len(completion["pending_ids"])
+    completed_count = len(completion["completed_ids"])
+    total_count = len(all_section_ids or [])
+
+    if _is_completed_main_status(status):
+        label = "Completed"
+    elif status == "household_submitted":
+        label = "Main Submitted"
+    elif pending_count > 0:
+        label = f"Pending ({pending_count}/{total_count} sections)"
+    elif completed_count > 0:
+        label = "In Progress"
+    else:
+        label = "Not Started"
+
+    if skipped_count > 0 and not _is_completed_main_status(status):
+        label += f" - Skipped {skipped_count}"
+
+    return {
+        "questionnaire_status": label,
+        "pending_sections_count": pending_count,
+        "skipped_sections_count": skipped_count,
+        "completed_sections_count": completed_count,
+        "total_sections_count": total_count,
+    }
+
+
+def _to_json_text(value):
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return value
+    try:
+        return json.dumps(value)
+    except Exception:
+        return str(value)
+
+
+def _log_main_response_history(main_questionnaire_id, previous_responses, action, household_id=None, user_id=None, username=None):
+    if not main_questionnaire_id:
+        return
+    db.session.execute(sql_text("""
+        INSERT INTO main_questionnaire_response_history
+        (main_questionnaire_id, household_id, changed_by_user_id, changed_by_username, change_action, previous_responses)
+        VALUES (:mid, :hid, :uid, :uname, :action, :prev)
+    """), {
+        "mid": main_questionnaire_id,
+        "hid": household_id,
+        "uid": user_id,
+        "uname": username,
+        "action": action,
+        "prev": _to_json_text(previous_responses),
+    })
+
+
+def _log_draft_history(draft_id, household_id, previous_response_data, action, user_id=None, username=None):
+    if not household_id:
+        return
+    db.session.execute(sql_text("""
+        INSERT INTO household_response_draft_history
+        (draft_id, household_id, changed_by_user_id, changed_by_username, change_action, previous_response_data)
+        VALUES (:did, :hid, :uid, :uname, :action, :prev)
+    """), {
+        "did": draft_id,
+        "hid": household_id,
+        "uid": user_id,
+        "uname": username,
+        "action": action,
+        "prev": _to_json_text(previous_response_data),
+    })
+
+
 def _ensure_survey_contributor(main_questionnaire_id, user_id):
     if not main_questionnaire_id or not user_id:
         return
@@ -491,6 +864,26 @@ def _ensure_survey_contributor(main_questionnaire_id, user_id):
         VALUES (:mid, :uid)
         ON DUPLICATE KEY UPDATE user_id = user_id
     """), {"mid": main_questionnaire_id, "uid": user_id})
+
+
+def _reopen_main_submission(main_questionnaire_id, payload, user_id, username):
+    _log_main_response_history(
+        main_questionnaire_id,
+        payload,
+        action="reopen_main_submission",
+        user_id=user_id,
+        username=username,
+    )
+    data = payload if isinstance(payload, dict) else {}
+    data["status"] = "draft"
+    data["reopened_at"] = datetime.now().isoformat()
+    data["reopened_by_user_id"] = user_id
+    data["reopened_by_username"] = username
+    db.session.execute(sql_text("""
+        UPDATE main_questionnaire_responses
+        SET responses = :resp
+        WHERE main_questionnaire_id = :mid
+    """), {"resp": json.dumps(data), "mid": main_questionnaire_id})
 
 
 def _get_aadhar_enc_key():
@@ -922,6 +1315,20 @@ def normalize_question_payload(data: dict):
         if trigger_value == "":
             trigger_value = None
 
+    is_mandatory = data.get("is_mandatory", None)
+    if isinstance(is_mandatory, bool):
+        is_mandatory = 1 if is_mandatory else None
+    elif isinstance(is_mandatory, (int, float)):
+        is_mandatory = 1 if int(is_mandatory) != 0 else None
+    elif isinstance(is_mandatory, str):
+        val = is_mandatory.strip().lower()
+        if val in ("1", "true", "yes", "y", "mandatory", "required"):
+            is_mandatory = 1
+        else:
+            is_mandatory = None
+    else:
+        is_mandatory = None
+
     # Only choice questions should keep options
     if question_type == "open_ended":
         options = None
@@ -931,6 +1338,7 @@ def normalize_question_payload(data: dict):
         "question_text": question_text_value,
         "question_type": question_type,
         "answer_type": answer_type,
+        "is_mandatory": is_mandatory,
         "options": options,
         "parent_id": parent_id,
         "trigger_value": trigger_value
@@ -1205,11 +1613,14 @@ def get_household_draft():
         draft_payload = safe_json_load(draft_row["response_data"]) if draft_row else {}
         combined = _combine_draft_sections(draft_payload)
 
+        reopened_for_edit = bool(session.pop("force_reopen_main", False))
+
         return jsonify({
             "success": True,
             "household_id": household_id,
             "main_questionnaire_id": main_id,
             "status": status,
+            "reopened_for_edit": reopened_for_edit,
             "draft": draft_payload,
             "responses": combined
         })
@@ -1245,6 +1656,14 @@ def save_survey_draft():
         existing["updated_at"] = datetime.now().isoformat()
 
         if row and row.get("draft_id"):
+            _log_draft_history(
+                row.get("draft_id"),
+                household_id,
+                row.get("response_data"),
+                action="save_survey_draft",
+                user_id=user_id,
+                username=session.get("username"),
+            )
             db.session.execute(sql_text("""
                 UPDATE household_response_drafts
                 SET response_data = :data
@@ -1362,6 +1781,8 @@ def household():
 
     try:
         data = json_body()
+        admin_username = (data.get("admin_username") or "").strip()
+        admin_password = data.get("admin_password") or ""
 
         required = ["household_name", "state_id", "district_id", "block_id", "sub_center_id", "village_id"]
         for k in required:
@@ -1369,6 +1790,7 @@ def household():
                 return json_error(f"{k.replace('_', ' ').title()} is required", 400)
 
         household_name = (data.get("household_name") or "").strip()
+        reopen_completed = to_bool_flag(data.get("reopen_completed"), default=0) == 1
         if not household_name:
             return json_error("Household name is required", 400)
 
@@ -1388,8 +1810,18 @@ def household():
 
             if main_row:
                 resp_payload = safe_json_load(main_row.get("responses")) if main_row.get("responses") is not None else {}
-                if _extract_status(resp_payload) == "submitted":
-                    return json_error("Survey already completed for this household.", 409)
+                if _is_completed_main_status(_extract_status(resp_payload)):
+                    if not reopen_completed:
+                        return json_error("Survey already completed for this household. Enable reopen to edit it.", 409)
+                    if not _verify_admin_credentials(admin_username, admin_password):
+                        return json_error("Valid admin credentials are required to re-open a completed survey.", 403)
+                    _reopen_main_submission(
+                        main_row["main_questionnaire_id"],
+                        resp_payload,
+                        session.get("user_id"),
+                        session.get("username")
+                    )
+                    session["force_reopen_main"] = True
                 main_id = main_row["main_questionnaire_id"]
             else:
                 draft_payload = json.dumps({
@@ -1435,6 +1867,7 @@ def household():
                 "household_id": household_id,
                 "main_questionnaire_id": main_id,
                 "resumed": True,
+                "reopened": bool(reopen_completed and main_row and _is_completed_main_status(_extract_status(resp_payload))),
                 "draft": draft_payload,
                 "responses": combined,
                 "has_location": has_location,
@@ -1552,6 +1985,9 @@ def resume_household():
     try:
         data = json_body()
         household_name = (data.get("household_name") or "").strip()
+        reopen_completed = to_bool_flag(data.get("reopen_completed"), default=0) == 1
+        admin_username = (data.get("admin_username") or "").strip()
+        admin_password = data.get("admin_password") or ""
         if not household_name:
             return json_error("household_name is required", 400)
 
@@ -1573,8 +2009,18 @@ def resume_household():
 
         if main_row:
             resp_payload = safe_json_load(main_row.get("responses")) if main_row.get("responses") is not None else {}
-            if _extract_status(resp_payload) == "submitted":
-                return json_error("Survey already completed for this household.", 409)
+            if _is_completed_main_status(_extract_status(resp_payload)):
+                if not reopen_completed:
+                    return json_error("Survey already completed for this household. Enable reopen to edit it.", 409)
+                if not _verify_admin_credentials(admin_username, admin_password):
+                    return json_error("Valid admin credentials are required to re-open a completed survey.", 403)
+                _reopen_main_submission(
+                    main_row["main_questionnaire_id"],
+                    resp_payload,
+                    session.get("user_id"),
+                    session.get("username")
+                )
+                session["force_reopen_main"] = True
             main_id = main_row["main_questionnaire_id"]
         else:
             draft_payload = json.dumps({
@@ -1611,6 +2057,7 @@ def resume_household():
             "household_id": household_id,
             "main_questionnaire_id": main_id,
             "resumed": True,
+            "reopened": bool(reopen_completed and main_row and _is_completed_main_status(_extract_status(resp_payload))),
             "draft": draft_payload,
             "responses": combined
         })
@@ -1623,7 +2070,12 @@ def resume_household():
 def get_questionnaire_data():
     try:
         sections = db.session.execute(
-            sql_text("SELECT * FROM questionnaire_sections ORDER BY section_order")
+            sql_text("""
+                SELECT *
+                FROM questionnaire_sections
+                WHERE COALESCE(show_on_user_end, 1) = 1
+                ORDER BY section_order
+            """)
         ).mappings().all()
 
         result = []
@@ -1645,11 +2097,21 @@ def get_questionnaire_data():
     except Exception as e:
         return json_error(str(e), 500)
 
+
+@app.route("/api/questionnaire/data")
+def get_questionnaire_data_legacy():
+    return get_questionnaire_data()
+
 @app.route("/api/individual-questionnaire-data")
 def get_individual_questionnaire_data():
     try:
         sections = db.session.execute(
-            sql_text("SELECT * FROM individual_questionnaire_sections ORDER BY section_order")
+            sql_text("""
+                SELECT *
+                FROM individual_questionnaire_sections
+                WHERE COALESCE(show_on_user_end, 1) = 1
+                ORDER BY section_order
+            """)
         ).mappings().all()
 
         result = []
@@ -1694,13 +2156,18 @@ def save_responses():
         household_id = session["household_id"]
         user_id = session.get("user_id")
 
-        if not data or not data.get("responses"):
+        if not data:
             return jsonify({"success": True, "message": "No responses to save"})
 
         section_id = data.get("section_id")
         if section_id is None:
             return json_error("section_id is required", 400)
         responses = data.get("responses", {})
+        is_skipped = bool(data.get("is_skipped"))
+        if not isinstance(responses, dict):
+            responses = {}
+        if not responses and not is_skipped:
+            return jsonify({"success": True, "message": "No responses to save"})
         timestamp = data.get("timestamp", datetime.now().isoformat())
         
         # 🌍 Get location data if provided
@@ -1751,6 +2218,7 @@ def save_responses():
         survey_state = existing.get("survey_state")
         sections[str(section_id)] = {
             "responses": responses,
+            "is_skipped": is_skipped,
             "timestamp": timestamp
         }
 
@@ -1765,6 +2233,14 @@ def save_responses():
             payload["survey_state"] = survey_state
 
         if row and row.get("draft_id"):
+            _log_draft_history(
+                row.get("draft_id"),
+                household_id,
+                row.get("response_data"),
+                action="save_responses",
+                user_id=user_id,
+                username=session.get("username"),
+            )
             db.session.execute(sql_text("""
                 UPDATE household_response_drafts
                 SET response_data = :data
@@ -1819,6 +2295,11 @@ def save_responses():
         db.session.rollback()
         return json_error(str(e), 500)
 
+
+@app.route("/api/save_responses", methods=["POST"])
+def save_responses_legacy():
+    return save_responses()
+
 @app.route("/api/main-questionnaire/submit", methods=["POST"])
 def submit_main_questionnaire():
     if session.get("role") != "user" or "household_id" not in session:
@@ -1827,6 +2308,7 @@ def submit_main_questionnaire():
     try:
         data = json_body()
         responses = data.get("responses", None)
+        draft_payload = {}
 
         household_id = safe_int(session.get("household_id"))
         user_id = session.get("user_id")
@@ -1840,22 +2322,68 @@ def submit_main_questionnaire():
         if not household:
             return json_error("Household not found. Please create/select a household before submitting.", 400)
 
-        # Fallback: if responses are missing/empty, rebuild from draft sections
+        draft_row = db.session.execute(sql_text("""
+            SELECT response_data
+            FROM household_response_drafts
+            WHERE household_id = :hid
+            ORDER BY updated_at DESC
+            LIMIT 1
+        """), {"hid": household_id}).mappings().fetchone()
+        draft_payload = safe_json_load(draft_row["response_data"]) if draft_row else {}
+
+        # Combine historical main responses + draft responses + current payload responses
+        # so reopen/edit flows don't falsely appear as pending when answers already exist.
+        latest_main_row = db.session.execute(sql_text("""
+            SELECT responses
+            FROM main_questionnaire_responses
+            WHERE household_id = :hid
+            ORDER BY main_questionnaire_id DESC
+            LIMIT 1
+        """), {"hid": household_id}).mappings().fetchone()
+        latest_main_payload = safe_json_load(latest_main_row["responses"]) if latest_main_row else {}
+        latest_main_answers = (latest_main_payload or {}).get("responses", {}) if isinstance(latest_main_payload, dict) else {}
+
+        merged_answers = {}
+        if isinstance(latest_main_answers, dict):
+            merged_answers.update(latest_main_answers)
+        merged_answers.update(_combine_draft_sections(draft_payload))
+        if isinstance(responses, dict):
+            merged_answers.update(responses)
+
+        all_section_ids = _main_section_ids()
+        completion = _section_completion_from_draft(draft_payload, all_section_ids)
+        answered_section_ids, answered_details = _answered_section_ids_from_responses(
+            all_section_ids,
+            merged_answers,
+            include_details=True,
+        )
+
+        completed_ids = set(completion["completed_ids"]) | answered_section_ids
+        skipped_ids = set(completion["skipped_ids"])
+        # Stale skipped flags should not block if the section is now answered.
+        effective_skipped_ids = skipped_ids - answered_section_ids
+        completed_ids -= effective_skipped_ids
+        pending_ids = sorted(set(all_section_ids) - completed_ids)
+
+        if pending_ids:
+            pending_details = {
+                str(sid): answered_details.get(sid, {
+                    "applicable_mandatory_question_ids": [],
+                    "missing_mandatory_question_ids": [],
+                })
+                for sid in pending_ids
+            }
+            return jsonify({
+                "success": False,
+                "error": "Please complete all sections before final submit.",
+                "pending_section_ids": pending_ids,
+                "pending_section_details": pending_details,
+                "skipped_section_ids": sorted(skipped_ids),
+            }), 400
+
+        # Fallback: if responses are missing/empty, rebuild from saved draft sections
         if not isinstance(responses, dict) or len(responses) == 0:
-            draft_row = db.session.execute(sql_text("""
-                SELECT response_data
-                FROM household_response_drafts
-                WHERE household_id = :hid
-                ORDER BY updated_at DESC
-                LIMIT 1
-            """), {"hid": household_id}).mappings().fetchone()
-            draft_payload = safe_json_load(draft_row["response_data"]) if draft_row else {}
-            combined = {}
-            for sec in (draft_payload or {}).get("sections", {}).values():
-                sec_resp = (sec or {}).get("responses") or {}
-                if isinstance(sec_resp, dict):
-                    combined.update(sec_resp)
-            responses = combined
+            responses = _combine_draft_sections(draft_payload)
 
         if not isinstance(responses, dict) or len(responses) == 0:
             return json_error("responses is required", 400)
@@ -1872,7 +2400,7 @@ def submit_main_questionnaire():
         existing_id = safe_int(data.get("main_questionnaire_id")) or safe_int(session.get("main_questionnaire_id"))
         if not existing_id:
             existing_row = db.session.execute(sql_text("""
-                SELECT main_questionnaire_id
+                SELECT main_questionnaire_id, responses
                 FROM main_questionnaire_responses
                 WHERE household_id = :hid
                 ORDER BY main_questionnaire_id DESC
@@ -1882,11 +2410,19 @@ def submit_main_questionnaire():
                 existing_id = existing_row["main_questionnaire_id"]
         if existing_id:
             row = db.session.execute(sql_text("""
-                SELECT main_questionnaire_id
+                SELECT main_questionnaire_id, responses
                 FROM main_questionnaire_responses
                 WHERE main_questionnaire_id = :mid AND household_id = :hid
             """), {"mid": existing_id, "hid": household_id}).mappings().fetchone()
             if row:
+                _log_main_response_history(
+                    existing_id,
+                    row.get("responses"),
+                    action="submit_main_questionnaire",
+                    household_id=household_id,
+                    user_id=user_id,
+                    username=session.get("username"),
+                )
                 db.session.execute(sql_text("""
                     UPDATE main_questionnaire_responses
                     SET responses = :resp
@@ -1897,7 +2433,7 @@ def submit_main_questionnaire():
                 session["main_questionnaire_id"] = existing_id
                 return jsonify({"success": True, "main_questionnaire_id": existing_id})
             latest_row = db.session.execute(sql_text("""
-                SELECT main_questionnaire_id
+                SELECT main_questionnaire_id, responses
                 FROM main_questionnaire_responses
                 WHERE household_id = :hid
                 ORDER BY main_questionnaire_id DESC
@@ -1905,6 +2441,14 @@ def submit_main_questionnaire():
             """), {"hid": household_id}).mappings().fetchone()
             if latest_row:
                 existing_id = latest_row["main_questionnaire_id"]
+                _log_main_response_history(
+                    existing_id,
+                    latest_row.get("responses"),
+                    action="submit_main_questionnaire",
+                    household_id=household_id,
+                    user_id=user_id,
+                    username=session.get("username"),
+                )
                 db.session.execute(sql_text("""
                     UPDATE main_questionnaire_responses
                     SET responses = :resp
@@ -1966,7 +2510,15 @@ def complete_household_survey():
             return json_error("Main questionnaire not found.", 404)
 
         payload = safe_json_load(row["responses"]) or {}
-        if _extract_status(payload) != "submitted":
+        if not _is_completed_main_status(_extract_status(payload)):
+            _log_main_response_history(
+                main_id,
+                row.get("responses"),
+                action="complete_household_survey",
+                household_id=household_id,
+                user_id=user_id,
+                username=session.get("username"),
+            )
             payload["status"] = "submitted"
             payload["completed_at"] = datetime.now().isoformat()
             db.session.execute(sql_text("""
@@ -2284,7 +2836,12 @@ def admin_get_individual_response(individual_questionnaire_id):
 def admin_get_sections():
     try:
         rows = db.session.execute(sql_text("""
-            SELECT * FROM questionnaire_sections
+            SELECT
+                section_id,
+                section_title,
+                section_order,
+                CAST(COALESCE(show_on_user_end, 1) AS UNSIGNED) AS show_on_user_end
+            FROM questionnaire_sections
             ORDER BY section_order
         """)).mappings().all()
         return jsonify([dict(r) for r in rows])
@@ -2296,7 +2853,12 @@ def admin_get_sections():
 def admin_get_individual_sections():
     try:
         rows = db.session.execute(sql_text("""
-            SELECT * FROM individual_questionnaire_sections
+            SELECT
+                section_id,
+                section_title,
+                section_order,
+                CAST(COALESCE(show_on_user_end, 1) AS UNSIGNED) AS show_on_user_end
+            FROM individual_questionnaire_sections
             ORDER BY section_order
         """)).mappings().all()
         return jsonify([dict(r) for r in rows])
@@ -2388,13 +2950,36 @@ def admin_get_admins():
             return json_error(str(e), 500)
 
 
+@app.route("/api/admin/statistics")
+@role_required("admin")
+def admin_statistics_legacy():
+    def _count(table_name):
+        row = db.session.execute(sql_text(f"SELECT COUNT(*) AS cnt FROM {table_name}")).mappings().fetchone()
+        return int(row["cnt"]) if row else 0
+
+    try:
+        payload = {
+            "total_users": _count("users"),
+            "total_households": _count("households"),
+            "total_states": _count("states"),
+            "total_districts": _count("districts"),
+            "total_sections": _count("questionnaire_sections"),
+            "total_questions": _count("questions"),
+            "total_responses": _count("main_questionnaire_responses"),
+        }
+        return jsonify(payload)
+    except Exception as e:
+        return json_error(str(e), 500)
+
+
 @app.route("/api/admin/all-households")
+@app.route("/api/admin/households")
 @role_required("admin")
 def admin_get_all_households():
     try:
         search = (request.args.get("search") or "").strip()
         base = """
-            SELECT
+            SELECT DISTINCT
                 h.household_id,
                 h.name AS head_name,
                 COALESCE(u.username, u_owner.username, '—') AS username,
@@ -2402,13 +2987,16 @@ def admin_get_all_households():
                 d.name AS district_name,
                 b.name AS block_name,
                 sc.name AS sub_center_name,
-                v.village_lgd_code AS village_lgd_code
+                v.village_lgd_code AS village_lgd_code,
+                mqr.responses AS main_responses,
+                dr.response_data AS draft_data
             FROM households h
             LEFT JOIN (
                 SELECT household_id, MAX(main_questionnaire_id) AS main_questionnaire_id
                 FROM main_questionnaire_responses
                 GROUP BY household_id
             ) mm ON mm.household_id = h.household_id
+            LEFT JOIN main_questionnaire_responses mqr ON mqr.main_questionnaire_id = mm.main_questionnaire_id
             LEFT JOIN survey_contributors contrib ON contrib.main_questionnaire_id = mm.main_questionnaire_id
             LEFT JOIN users u ON contrib.user_id = u.user_id
             LEFT JOIN users u_owner ON h.user_id = u_owner.user_id
@@ -2417,6 +3005,15 @@ def admin_get_all_households():
             LEFT JOIN blocks b ON h.block_id = b.block_id
             LEFT JOIN sub_centers sc ON h.sub_center_id = sc.sub_center_id
             LEFT JOIN villages v ON h.village_id = v.village_id
+            LEFT JOIN (
+                SELECT d1.household_id, d1.response_data
+                FROM household_response_drafts d1
+                INNER JOIN (
+                    SELECT household_id, MAX(draft_id) AS draft_id
+                    FROM household_response_drafts
+                    GROUP BY household_id
+                ) d2 ON d2.draft_id = d1.draft_id
+            ) dr ON dr.household_id = h.household_id
         """
         params = {}
         if search:
@@ -2425,7 +3022,15 @@ def admin_get_all_households():
         base += " ORDER BY h.household_id DESC LIMIT 500"
 
         rows = db.session.execute(sql_text(base), params).mappings().all()
-        return jsonify([dict(r) for r in rows])
+        all_section_ids = _main_section_ids()
+        result = []
+        for r in rows:
+            item = dict(r)
+            main_payload = safe_json_load(item.pop("main_responses", None))
+            draft_payload = safe_json_load(item.pop("draft_data", None))
+            item.update(_admin_household_status(main_payload, draft_payload, all_section_ids))
+            result.append(item)
+        return jsonify(result)
     except Exception as e:
         return json_error(str(e), 500)
 
@@ -2436,7 +3041,7 @@ def admin_get_household_locations():
     """Get all households with GPS coordinates for map display"""
     try:
         query = sql_text("""
-            SELECT
+            SELECT DISTINCT
                 h.household_id,
                 h.name,
                 h.latitude,
@@ -2507,13 +3112,16 @@ def admin_filter_households():
                 d.name AS district_name,
                 b.name AS block_name,
                 sc.name AS sub_center_name,
-                v.village_lgd_code AS village_lgd_code
+                v.village_lgd_code AS village_lgd_code,
+                mqr.responses AS main_responses,
+                dr.response_data AS draft_data
             FROM households h
             LEFT JOIN (
                 SELECT household_id, MAX(main_questionnaire_id) AS main_questionnaire_id
                 FROM main_questionnaire_responses
                 GROUP BY household_id
             ) mm ON mm.household_id = h.household_id
+            LEFT JOIN main_questionnaire_responses mqr ON mqr.main_questionnaire_id = mm.main_questionnaire_id
             LEFT JOIN survey_contributors contrib ON contrib.main_questionnaire_id = mm.main_questionnaire_id
             LEFT JOIN users u ON contrib.user_id = u.user_id
             LEFT JOIN users u_owner ON h.user_id = u_owner.user_id
@@ -2522,6 +3130,15 @@ def admin_filter_households():
             LEFT JOIN blocks b ON h.block_id = b.block_id
             LEFT JOIN sub_centers sc ON h.sub_center_id = sc.sub_center_id
             LEFT JOIN villages v ON h.village_id = v.village_id
+            LEFT JOIN (
+                SELECT d1.household_id, d1.response_data
+                FROM household_response_drafts d1
+                INNER JOIN (
+                    SELECT household_id, MAX(draft_id) AS draft_id
+                    FROM household_response_drafts
+                    GROUP BY household_id
+                ) d2 ON d2.draft_id = d1.draft_id
+            ) dr ON dr.household_id = h.household_id
         """
 
         filters = []
@@ -2552,7 +3169,15 @@ def admin_filter_households():
         base += " ORDER BY h.household_id DESC LIMIT 500"
 
         rows = db.session.execute(sql_text(base), params).mappings().all()
-        return jsonify([dict(r) for r in rows])
+        all_section_ids = _main_section_ids()
+        result = []
+        for r in rows:
+            item = dict(r)
+            main_payload = safe_json_load(item.pop("main_responses", None))
+            draft_payload = safe_json_load(item.pop("draft_data", None))
+            item.update(_admin_household_status(main_payload, draft_payload, all_section_ids))
+            result.append(item)
+        return jsonify(result)
     except Exception as e:
         return json_error(str(e), 500)
 
@@ -3151,6 +3776,7 @@ def admin_create_section():
     try:
         data = json_body()
         title = (data.get("section_title") or data.get("title") or "").strip()
+        show_on_user_end = to_bool_flag(data.get("show_on_user_end"), default=1)
         if not title:
             return json_error("section_title is required", 400)
 
@@ -3160,9 +3786,9 @@ def admin_create_section():
         """)).mappings().fetchone()["next_order"]
 
         db.session.execute(sql_text("""
-            INSERT INTO questionnaire_sections (section_title, section_order)
-            VALUES (:t, :o)
-        """), {"t": title, "o": next_order})
+            INSERT INTO questionnaire_sections (section_title, section_order, show_on_user_end)
+            VALUES (:t, :o, :show)
+        """), {"t": title, "o": next_order, "show": show_on_user_end})
         db.session.commit()
 
         new_id = db.session.execute(sql_text("SELECT LAST_INSERT_ID() AS id")).mappings().fetchone()["id"]
@@ -3178,15 +3804,31 @@ def admin_create_section():
 def admin_update_section(section_id):
     try:
         data = json_body()
-        title = (data.get("section_title") or data.get("title") or "").strip()
-        if not title:
-            return json_error("section_title is required", 400)
+        title_raw = data.get("section_title") if "section_title" in data else data.get("title")
+        title = (title_raw or "").strip() if title_raw is not None else None
+        show_flag = data.get("show_on_user_end")
 
-        db.session.execute(sql_text("""
+        updates = []
+        params = {"id": section_id}
+
+        if title is not None:
+            if not title:
+                return json_error("section_title cannot be empty", 400)
+            updates.append("section_title = :t")
+            params["t"] = title
+
+        if show_flag is not None:
+            updates.append("show_on_user_end = :show")
+            params["show"] = to_bool_flag(show_flag, default=1)
+
+        if not updates:
+            return json_error("Nothing to update", 400)
+
+        db.session.execute(sql_text(f"""
             UPDATE questionnaire_sections
-            SET section_title = :t
+            SET {', '.join(updates)}
             WHERE section_id = :id
-        """), {"t": title, "id": section_id})
+        """), params)
         db.session.commit()
         return jsonify({"success": True})
 
@@ -3299,15 +3941,31 @@ def admin_delete_individual_section(section_id):
 def admin_update_individual_section(section_id):
     try:
         data = json_body()
-        title = (data.get("section_title") or data.get("title") or "").strip()
-        if not title:
-            return json_error("section_title is required", 400)
+        title_raw = data.get("section_title") if "section_title" in data else data.get("title")
+        title = (title_raw or "").strip() if title_raw is not None else None
+        show_flag = data.get("show_on_user_end")
 
-        db.session.execute(sql_text("""
+        updates = []
+        params = {"id": section_id}
+
+        if title is not None:
+            if not title:
+                return json_error("section_title cannot be empty", 400)
+            updates.append("section_title = :t")
+            params["t"] = title
+
+        if show_flag is not None:
+            updates.append("show_on_user_end = :show")
+            params["show"] = to_bool_flag(show_flag, default=1)
+
+        if not updates:
+            return json_error("Nothing to update", 400)
+
+        db.session.execute(sql_text(f"""
             UPDATE individual_questionnaire_sections
-            SET section_title = :t
+            SET {', '.join(updates)}
             WHERE section_id = :id
-        """), {"t": title, "id": section_id})
+        """), params)
         db.session.commit()
         return jsonify({"success": True})
 
@@ -3321,6 +3979,7 @@ def admin_create_individual_section():
     try:
         data = json_body()
         title = (data.get("section_title") or data.get("title") or "").strip()
+        show_on_user_end = to_bool_flag(data.get("show_on_user_end"), default=1)
         if not title:
             return json_error("section_title is required", 400)
 
@@ -3330,9 +3989,9 @@ def admin_create_individual_section():
         """)).mappings().fetchone()["next_order"]
 
         db.session.execute(sql_text("""
-            INSERT INTO individual_questionnaire_sections (section_title, section_order)
-            VALUES (:t, :o)
-        """), {"t": title, "o": next_order})
+            INSERT INTO individual_questionnaire_sections (section_title, section_order, show_on_user_end)
+            VALUES (:t, :o, :show)
+        """), {"t": title, "o": next_order, "show": show_on_user_end})
         db.session.commit()
 
         new_id = db.session.execute(sql_text("SELECT LAST_INSERT_ID() AS id")).mappings().fetchone()["id"]
@@ -4028,14 +4687,15 @@ def admin_create_question():
             order_val = next_order + idx
             db.session.execute(sql_text("""
                 INSERT INTO questions
-                (question_section_id, question_text, question_type, answer_type, options, parent_id, trigger_value, question_order)
+                (question_section_id, question_text, question_type, answer_type, is_mandatory, options, parent_id, trigger_value, question_order)
                 VALUES
-                (:sid, :qt, :qtype, :atype, :opts, :pid, :tval, :ord)
+                (:sid, :qt, :qtype, :atype, :mandatory, :opts, :pid, :tval, :ord)
             """), {
                 "sid": payload["section_id"],
                 "qt": qt_val,
                 "qtype": payload["question_type"],
                 "atype": payload["answer_type"],
+                "mandatory": payload["is_mandatory"],
                 "opts": payload["options"],
                 "pid": payload["parent_id"],
                 "tval": tval,
@@ -4091,14 +4751,15 @@ def admin_create_individual_question():
             order_val = next_order + idx
             db.session.execute(sql_text("""
                 INSERT INTO individual_questions
-                (question_section_id, question_text, question_type, answer_type, options, parent_id, trigger_value, question_order)
+                (question_section_id, question_text, question_type, answer_type, is_mandatory, options, parent_id, trigger_value, question_order)
                 VALUES
-                (:sid, :qt, :qtype, :atype, :opts, :pid, :tval, :ord)
+                (:sid, :qt, :qtype, :atype, :mandatory, :opts, :pid, :tval, :ord)
             """), {
                 "sid": payload["section_id"],
                 "qt": qt_val,
                 "qtype": payload["question_type"],
                 "atype": payload["answer_type"],
+                "mandatory": payload["is_mandatory"],
                 "opts": payload["options"],
                 "pid": payload["parent_id"],
                 "tval": tval,
@@ -4142,6 +4803,7 @@ def admin_update_question(question_id):
                 question_text = :qt,
                 question_type = :qtype,
                 answer_type = :atype,
+                is_mandatory = :mandatory,
                 options = :opts,
                 parent_id = :pid,
                 trigger_value = :tval
@@ -4151,6 +4813,7 @@ def admin_update_question(question_id):
             "qt": qt_val,
             "qtype": payload["question_type"],
             "atype": payload["answer_type"],
+            "mandatory": payload["is_mandatory"],
             "opts": payload["options"],
             "pid": payload["parent_id"],
             "tval": payload["trigger_value"],
@@ -4184,6 +4847,7 @@ def admin_update_individual_question(question_id):
                 question_text = :qt,
                 question_type = :qtype,
                 answer_type = :atype,
+                is_mandatory = :mandatory,
                 options = :opts,
                 parent_id = :pid,
                 trigger_value = :tval
@@ -4193,6 +4857,7 @@ def admin_update_individual_question(question_id):
             "qt": qt_val,
             "qtype": payload["question_type"],
             "atype": payload["answer_type"],
+            "mandatory": payload["is_mandatory"],
             "opts": payload["options"],
             "pid": payload["parent_id"],
             "tval": payload["trigger_value"],
@@ -4239,7 +4904,7 @@ def get_questions_tree(section_id):
     try:
         rows = db.session.execute(sql_text("""
             SELECT question_id, question_section_id, question_text, question_type,
-                   answer_type, options, parent_id, trigger_value, question_order
+                   answer_type, is_mandatory, options, parent_id, trigger_value, question_order
             FROM questions
             WHERE question_section_id = :sid
             ORDER BY parent_id, question_order
@@ -4256,6 +4921,7 @@ def get_questions_tree(section_id):
                         "question_text": q["question_text"],
                         "question_type": q["question_type"],
                         "answer_type": q["answer_type"],
+                        "is_mandatory": q.get("is_mandatory"),
                         "options": q.get("options"),
                         "parent_id": q.get("parent_id"),
                         "trigger_value": q.get("trigger_value"),

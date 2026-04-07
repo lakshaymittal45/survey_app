@@ -1335,6 +1335,13 @@
                 </div>
               </div>
 
+              <div style="margin-bottom: 15px;">
+                <label style="display: inline-flex; align-items: center; gap: 8px; font-weight: 600; color: #2c3e50; cursor: pointer;">
+                  <input type="checkbox" id="qm_is_mandatory" style="width: 16px; height: 16px;">
+                  Mark this question as mandatory
+                </label>
+              </div>
+
               <button
                 type="submit"
                 class="btn btn-primary"
@@ -1415,6 +1422,12 @@
                   id="sectionTitle"
                   placeholder="e.g., Household Demographics"
                 />
+              </div>
+              <div class="form-group" style="display:flex;align-items:flex-end;">
+                <label style="display:inline-flex;align-items:center;gap:8px;cursor:pointer;font-weight:600;">
+                  <input type="checkbox" id="sectionShowOnUserEnd" checked />
+                  Show on user end
+                </label>
               </div>
             </div>
             <button class="btn btn-primary" onclick="addSection()">
@@ -1668,6 +1681,13 @@
                 </div>
               </div>
 
+              <div style="margin-bottom: 15px;">
+                <label style="display: inline-flex; align-items: center; gap: 8px; font-weight: 600; color: #2c3e50; cursor: pointer;">
+                  <input type="checkbox" id="iqm_is_mandatory" style="width: 16px; height: 16px;">
+                  Mark this question as mandatory
+                </label>
+              </div>
+
               <button
                 type="submit"
                 class="btn btn-primary"
@@ -1746,6 +1766,12 @@
                   id="individualSectionTitle"
                   placeholder="e.g., Adult Health"
                 />
+              </div>
+              <div class="form-group" style="display:flex;align-items:flex-end;">
+                <label style="display:inline-flex;align-items:center;gap:8px;cursor:pointer;font-weight:600;">
+                  <input type="checkbox" id="individualSectionShowOnUserEnd" checked />
+                  Show on user end
+                </label>
               </div>
             </div>
             <button class="btn btn-primary" onclick="addIndividualSection()">
@@ -3795,12 +3821,14 @@
       function formatQuestionLabel(q) {
         const text = String(q.question_text || "").trim();
         const trigger = String(q.trigger_value || "").trim();
+        const mandatorySuffix = Number(q.is_mandatory) === 1 ? " *" : "";
         if (trigger) {
           const prefix = `${trigger} - `;
-          if (text.startsWith(prefix)) return text;
-          return text ? `${prefix}${text}` : trigger;
+          if (text.startsWith(prefix)) return `${text}${mandatorySuffix}`;
+          const base = text ? `${prefix}${text}` : trigger;
+          return `${base}${mandatorySuffix}`;
         }
-        return text;
+        return `${text}${mandatorySuffix}`;
       }
 
       function readTriggerValues(wrapperId) {
@@ -3972,6 +4000,7 @@
 
           // Also initialize sections list
           displaySections(sections);
+          updateSectionSelects(sections);
         } catch (error) {
           showMessage("Error loading sections: " + error.message, "error");
         }
@@ -4083,6 +4112,9 @@
           const trigger = q.trigger_value
             ? `<span class="qm-trigger">IF: ${escapeAttr(q.trigger_value)}</span>`
             : "";
+          const mandatory = Number(q.is_mandatory) === 1
+            ? '<span class="qm-trigger" style="background:#fee2e2;border-color:#fecaca;color:#b91c1c;">MANDATORY</span>'
+            : "";
           const badge = typeBadge(q);
           const isRoot = depth === 0 ? "root" : "";
 
@@ -4091,6 +4123,7 @@
             <div class="qm-card-header">
               <div class="qm-actions">
                 <span class="qm-badge">${badge}</span>
+                ${mandatory}
                 ${trigger}
               </div>
               <span class="qm-meta">ID:${escapeAttr(q.question_id)}</span>
@@ -4198,6 +4231,7 @@
         document.getElementById("qm_question_text").value = q.question_text || "";
         document.getElementById("qm_question_type").value = mapDbQuestionToUiType(q);
         document.getElementById("qm_options").value = optionsToCsv(q.options);
+        document.getElementById("qm_is_mandatory").checked = Number(q.is_mandatory) === 1;
 
         const parentValue = q.parent_id ? String(q.parent_id) : "0";
         document.getElementById("qm_parent_id").value = parentValue;
@@ -4220,6 +4254,7 @@
           const questionType =
             document.getElementById("qm_question_type").value;
           const optionsRaw = document.getElementById("qm_options").value.trim();
+          const isMandatory = document.getElementById("qm_is_mandatory").checked;
 
           if (!sectionId || !questionText) {
             showMessage("Section and Question Text are required", "error");
@@ -4250,6 +4285,7 @@
               section_id: parseInt(sectionId),
               question_text: questionText,
               answer_type: questionType,
+              is_mandatory: isMandatory ? 1 : null,
               options: options,
               parent_id: parentId !== "0" ? parseInt(parentId) : null,
               trigger_value: triggerValue,
@@ -4321,13 +4357,15 @@
         }
 
         let html =
-          '<table class="data-table"><tr><th>Section</th><th>Order</th><th>Actions</th></tr>';
+          '<table class="data-table"><tr><th>Section</th><th>Order</th><th>Show on User End</th><th>Actions</th></tr>';
         sections.forEach((s) => {
+          const showChecked = Number(s.show_on_user_end ?? 1) === 1 ? "checked" : "";
           html += `<tr>
           <td>${escapeAttr(s.section_title)}</td>
           <td>${escapeAttr(s.section_order ?? "")}</td>
+          <td><input type="checkbox" ${showChecked} onchange="toggleSectionVisibility(${s.section_id}, this.checked)"></td>
           <td class="actions">
-            <button class="btn btn-edit" onclick="editSection(${s.section_id}, '${escapeJsStr(s.section_title)}')">Edit</button>
+            <button class="btn btn-edit" onclick="editSection(${s.section_id}, '${escapeJsStr(s.section_title)}', ${Number(s.show_on_user_end ?? 1) === 1 ? "true" : "false"})">Edit</button>
             <button class="btn btn-danger" onclick="deleteSection(${s.section_id})">Delete</button>
           </td>
         </tr>`;
@@ -4336,8 +4374,26 @@
         document.getElementById("sectionsList").innerHTML = html;
       }
 
+      async function toggleSectionVisibility(id, isVisible) {
+        try {
+          const response = await apiFetch(`/api/admin/section/${id}`, {
+            method: "PUT",
+            body: JSON.stringify({ show_on_user_end: isVisible ? 1 : 0 }),
+          });
+          const result = await response.json();
+          if (!result.success) {
+            showMessage(result.error || "Failed to update section visibility", "error");
+            await loadQuestionnaireSections();
+          }
+        } catch (error) {
+          showMessage("Error: " + error.message, "error");
+          await loadQuestionnaireSections();
+        }
+      }
+
       async function addSection() {
         const title = document.getElementById("sectionTitle").value.trim();
+        const showOnUserEnd = document.getElementById("sectionShowOnUserEnd")?.checked ? 1 : 0;
         if (!title) {
           showMessage("Section title is required", "error");
           return;
@@ -4346,12 +4402,15 @@
         try {
           const response = await apiFetch("/api/admin/section", {
             method: "POST",
-            body: JSON.stringify({ section_title: title }),
+            body: JSON.stringify({ section_title: title, show_on_user_end: showOnUserEnd }),
           });
           const result = await response.json();
           if (result.success) {
             showMessage("Section added successfully", "success");
             document.getElementById("sectionTitle").value = "";
+            if (document.getElementById("sectionShowOnUserEnd")) {
+              document.getElementById("sectionShowOnUserEnd").checked = true;
+            }
             await loadQuestionnaireSections();
           } else {
             showMessage(result.error || "Failed to add section", "error");
@@ -4361,7 +4420,7 @@
         }
       }
 
-      function editSection(id, title) {
+      function editSection(id, title, showOnUserEnd = true) {
         editingData = { type: "section", id };
         document.getElementById("editModalTitle").textContent = "Edit Section";
         document.getElementById("editFormContent").innerHTML = `
@@ -4369,16 +4428,23 @@
           <label>Section Title *</label>
           <input type="text" id="editName" value="${escapeAttr(title)}" required>
         </div>
+        <div class="form-group">
+          <label style="display:inline-flex;align-items:center;gap:8px;cursor:pointer;">
+            <input type="checkbox" id="editShowOnUserEnd" ${showOnUserEnd ? "checked" : ""}>
+            Show on user end
+          </label>
+        </div>
       `;
 
         document.getElementById("editForm").onsubmit = async (e) => {
           e.preventDefault();
           const newTitle = document.getElementById("editName").value.trim();
+          const showOnUserEndNew = document.getElementById("editShowOnUserEnd")?.checked ? 1 : 0;
 
           try {
             const response = await apiFetch(`/api/admin/section/${id}`, {
               method: "PUT",
-              body: JSON.stringify({ section_title: newTitle }),
+              body: JSON.stringify({ section_title: newTitle, show_on_user_end: showOnUserEndNew }),
             });
             const result = await response.json();
             if (result.success) {
@@ -4545,6 +4611,9 @@
           const trigger = q.trigger_value
             ? `<span class="qm-trigger">IF: ${escapeAttr(q.trigger_value)}</span>`
             : "";
+          const mandatory = Number(q.is_mandatory) === 1
+            ? '<span class="qm-trigger" style="background:#fee2e2;border-color:#fecaca;color:#b91c1c;">MANDATORY</span>'
+            : "";
           const badge = typeBadge(q);
           const isRoot = depth === 0 ? "root" : "";
 
@@ -4553,6 +4622,7 @@
             <div class="qm-card-header">
               <div class="qm-actions">
                 <span class="qm-badge">${badge}</span>
+                ${mandatory}
                 ${trigger}
               </div>
               <span class="qm-meta">ID:${escapeAttr(q.question_id)}</span>
@@ -4659,6 +4729,7 @@
         document.getElementById("iqm_question_text").value = q.question_text || "";
         document.getElementById("iqm_question_type").value = mapDbQuestionToUiType(q);
         document.getElementById("iqm_options").value = optionsToCsv(q.options);
+        document.getElementById("iqm_is_mandatory").checked = Number(q.is_mandatory) === 1;
 
         const parentValue = q.parent_id ? String(q.parent_id) : "0";
         document.getElementById("iqm_parent_id").value = parentValue;
@@ -4682,6 +4753,7 @@
           const optionsRaw = document
             .getElementById("iqm_options")
             .value.trim();
+          const isMandatory = document.getElementById("iqm_is_mandatory").checked;
 
           if (!sectionId || !questionText) {
             showMessage("Section and Question Text are required", "error");
@@ -4712,6 +4784,7 @@
               section_id: parseInt(sectionId),
               question_text: questionText,
               answer_type: questionType,
+              is_mandatory: isMandatory ? 1 : null,
               options: options,
               parent_id: parentId !== "0" ? parseInt(parentId) : null,
               trigger_value: triggerValue,
@@ -4783,13 +4856,15 @@
         }
 
         let html =
-          '<table class="data-table"><tr><th>Section</th><th>Order</th><th>Actions</th></tr>';
+          '<table class="data-table"><tr><th>Section</th><th>Order</th><th>Show on User End</th><th>Actions</th></tr>';
         sections.forEach((s) => {
+          const showChecked = Number(s.show_on_user_end ?? 1) === 1 ? "checked" : "";
           html += `<tr>
           <td>${escapeAttr(s.section_title)}</td>
           <td>${escapeAttr(s.section_order ?? "")}</td>
+          <td><input type="checkbox" ${showChecked} onchange="toggleIndividualSectionVisibility(${s.section_id}, this.checked)"></td>
           <td class="actions">
-            <button class="btn btn-edit" onclick="editIndividualSection(${s.section_id}, '${escapeJsStr(s.section_title)}')">Edit</button>
+            <button class="btn btn-edit" onclick="editIndividualSection(${s.section_id}, '${escapeJsStr(s.section_title)}', ${Number(s.show_on_user_end ?? 1) === 1 ? "true" : "false"})">Edit</button>
             <button class="btn btn-danger" onclick="deleteIndividualSection(${s.section_id})">Delete</button>
           </td>
         </tr>`;
@@ -4798,10 +4873,28 @@
         document.getElementById("individualSectionsList").innerHTML = html;
       }
 
+      async function toggleIndividualSectionVisibility(id, isVisible) {
+        try {
+          const response = await apiFetch(`/api/admin/individual-section/${id}`, {
+            method: "PUT",
+            body: JSON.stringify({ show_on_user_end: isVisible ? 1 : 0 }),
+          });
+          const result = await response.json();
+          if (!result.success) {
+            showMessage(result.error || "Failed to update section visibility", "error");
+            await loadIndividualQuestionnaireSections();
+          }
+        } catch (error) {
+          showMessage("Error: " + error.message, "error");
+          await loadIndividualQuestionnaireSections();
+        }
+      }
+
       async function addIndividualSection() {
         const title = document
           .getElementById("individualSectionTitle")
           .value.trim();
+        const showOnUserEnd = document.getElementById("individualSectionShowOnUserEnd")?.checked ? 1 : 0;
         if (!title) {
           showMessage("Section title is required", "error");
           return;
@@ -4810,12 +4903,15 @@
         try {
           const response = await apiFetch("/api/admin/individual-section", {
             method: "POST",
-            body: JSON.stringify({ section_title: title }),
+            body: JSON.stringify({ section_title: title, show_on_user_end: showOnUserEnd }),
           });
           const result = await response.json();
           if (result.success) {
             showMessage("Individual section added successfully", "success");
             document.getElementById("individualSectionTitle").value = "";
+            if (document.getElementById("individualSectionShowOnUserEnd")) {
+              document.getElementById("individualSectionShowOnUserEnd").checked = true;
+            }
             await loadIndividualQuestionnaireSections();
           } else {
             showMessage(result.error || "Failed to add section", "error");
@@ -4825,7 +4921,7 @@
         }
       }
 
-      function editIndividualSection(id, title) {
+      function editIndividualSection(id, title, showOnUserEnd = true) {
         editingData = { type: "individual-section", id };
         document.getElementById("editModalTitle").textContent =
           "Edit Individual Section";
@@ -4834,18 +4930,25 @@
           <label>Section Title *</label>
           <input type="text" id="editName" value="${escapeAttr(title)}" required>
         </div>
+        <div class="form-group">
+          <label style="display:inline-flex;align-items:center;gap:8px;cursor:pointer;">
+            <input type="checkbox" id="editShowOnUserEnd" ${showOnUserEnd ? "checked" : ""}>
+            Show on user end
+          </label>
+        </div>
       `;
 
         document.getElementById("editForm").onsubmit = async (e) => {
           e.preventDefault();
           const newTitle = document.getElementById("editName").value.trim();
+          const showOnUserEndNew = document.getElementById("editShowOnUserEnd")?.checked ? 1 : 0;
 
           try {
             const response = await apiFetch(
               `/api/admin/individual-section/${id}`,
               {
                 method: "PUT",
-                body: JSON.stringify({ section_title: newTitle }),
+                body: JSON.stringify({ section_title: newTitle, show_on_user_end: showOnUserEndNew }),
               },
             );
             const result = await response.json();
@@ -5936,6 +6039,26 @@
 
       let selectedHouseholds = new Set();
 
+      function householdStatusBadge(h) {
+        const statusText = h.questionnaire_status || "Not Started";
+        const statusLower = String(statusText).toLowerCase();
+
+        let bg = "#f3f4f6";
+        let fg = "#1f2937";
+        if (statusLower.includes("completed")) {
+          bg = "#dcfce7";
+          fg = "#166534";
+        } else if (statusLower.includes("submitted")) {
+          bg = "#dbeafe";
+          fg = "#1d4ed8";
+        } else if (statusLower.includes("pending") || statusLower.includes("skipped")) {
+          bg = "#fef3c7";
+          fg = "#92400e";
+        }
+
+        return `<span style="display:inline-flex;align-items:center;padding:4px 10px;border-radius:999px;font-size:12px;font-weight:700;background:${bg};color:${fg};">${escapeAttr(statusText)}</span>`;
+      }
+
       function displayHouseholds(households) {
         if (!households || households.length === 0) {
           document.getElementById("householdsList").innerHTML =
@@ -5945,7 +6068,7 @@
 
         const visibleIds = new Set();
         let html =
-          '<table class="data-table"><tr><th><label style="display:flex;align-items:center;gap:8px;"><input type="checkbox" id="hhSelectAll" onchange="toggleSelectAll(this)"> <span>Select All</span></label></th><th>Household Number</th><th>Household ID</th><th>Username</th><th>Village LGD</th><th>Actions</th></tr>';
+          '<table class="data-table"><tr><th><label style="display:flex;align-items:center;gap:8px;"><input type="checkbox" id="hhSelectAll" onchange="toggleSelectAll(this)"> <span>Select All</span></label></th><th>Household Number</th><th>Household ID</th><th>Username</th><th>Village LGD</th><th>Survey Status</th><th>Actions</th></tr>';
         households.forEach((h) => {
           const householdId = h.household_id ?? h.id ?? "N/A";
           const headName =
@@ -5968,6 +6091,7 @@
           <td>${escapeAttr(headName)}</td>
           <td>${escapeAttr(username)}</td>
           <td>${escapeAttr(village)}</td>
+          <td>${householdStatusBadge(h)}</td>
           <td class="actions">
             <button class="btn btn-edit" onclick="viewHousehold('${escapeJsStr(householdId)}')">View</button>
             <button class="btn btn-danger" onclick="deleteHousehold('${escapeJsStr(householdId)}')">Delete</button>

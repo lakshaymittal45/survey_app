@@ -9,6 +9,7 @@ A comprehensive Flask-based survey management system designed for longitudinal r
 ## Table of Contents
 
 - [Overview](#overview)
+- [Workflow (Mentor-Friendly)](#workflow-mentor-friendly)
 - [Features](#features)
 - [Tech Stack](#tech-stack)
 - [Prerequisites](#prerequisites)
@@ -41,6 +42,16 @@ The Longitudinal Survey Application is a complete survey management solution bui
 - **Role-based access control** (User, Admin)
 
 ---
+
+## Workflow (Mentor-Friendly)
+
+For a full end-to-end explanation of the system (UI → Flask routes → database), including Mermaid diagrams for:
+
+- User survey lifecycle (draft → submit → individual questionnaire → complete)
+- Admin management (locations/questionnaire/accounts/exports)
+- Conceptual data model
+
+See: [WORKFLOW.md](WORKFLOW.md)
 
 ## Features
 
@@ -209,7 +220,7 @@ docker-compose logs db
 # Wait ~30 seconds for MySQL to initialize
 sleep 30
 ```
-
+cd "d:\Projects\Survey\survey_app"; .\.venv\Scripts\python.exe app.py
 #### Step 4: Access phpMyAdmin (Optional)
 
 ```

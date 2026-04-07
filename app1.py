@@ -1,0 +1,5560 @@
+import os
+import json
+import secrets
+import traceback
+import csv
+import io
+import base64
+import hashlib
+import hmac
+from functools import wraps
+from datetime import datetime
+
+from flask import Flask, render_template, request, jsonify, session, redirect, url_for
+from flask import Response
+from flask_sqlalchemy import SQLAlchemy
+from sqlalchemy import text as sql_text
+from sqlalchemy.engine import URL
+from werkzeug.security import check_password_hash, generate_password_hash
+from werkzeug.middleware.proxy_fix import ProxyFix
+
+# Optional (recommended) for cross-origin calls from JS
+try:
+    from flask_cors import CORS
+except Exception:
+    CORS = None
+
+# Optional Excel reader for bulk uploads
+try:
+    from openpyxl import load_workbook
+except Exception:
+    load_workbook = None
+
+# Optional encryption (required for Aadhaar at rest)
+try:
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+except Exception:
+    AESGCM = None
+
+# Optional .env loader (uses current venv if installed)
+try:
+    from dotenv import load_dotenv
+except Exception:
+    load_dotenv = None
+
+if load_dotenv:
+    load_dotenv()
+
+# ==========================================================
+# APP + DATABASE CONFIG
+# ==========================================================
+
+app = Flask(__name__)
+
+# ----------------------------------------------------------
+# Secret key — MUST be set via environment variable in production
+# A missing key causes every restart to invalidate all sessions
+# and prevents multi-worker deployments from working correctly.
+# ----------------------------------------------------------
+_secret_key = os.environ.get("FLASK_SECRET_KEY")
+if not _secret_key:
+    import warnings
+    warnings.warn(
+        "FLASK_SECRET_KEY is not set. A random key is being used — all sessions "
+        "will be lost on restart and multi-worker deployments will break. "
+        "Set FLASK_SECRET_KEY to a stable 32-byte hex string in production.",
+        stacklevel=2,
+    )
+    _secret_key = secrets.token_hex(32)
+app.secret_key = _secret_key
+
+# ----------------------------------------------------------
+# Session cookie security
+# ----------------------------------------------------------
+app.config["SESSION_COOKIE_HTTPONLY"] = True
+app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
+# Only force Secure flag when not running in local dev mode
+if os.getenv("FLASK_ENV", "production") != "development":
+    app.config["SESSION_COOKIE_SECURE"] = True
+
+db = SQLAlchemy()
+DB_READY = False  # important guard flag
+
+# ----------------------------------------------------------
+# Build DB URL manually from MSSQL vars
+# ----------------------------------------------------------
+
+from sqlalchemy.engine import URL
+import os
+import logging as _logging
+
+mssql_host = os.getenv("MSSQLHOST")
+mssql_user = os.getenv("MSSQLUSER")
+mssql_password = os.getenv("MSSQLPASSWORD")
+mssql_db = os.getenv("MSSQLDATABASE")
+mssql_port = os.getenv("MSSQLPORT")
+mssql_driver = os.getenv("MSSQLDRIVER", "ODBC Driver 17 for SQL Server")
+
+if mssql_host and mssql_user and mssql_password and mssql_db:
+    database_url = URL.create(
+        "mssql+pyodbc",
+        username=mssql_user,
+        password=mssql_password,
+        host=mssql_host,              # localhost
+        port=int(mssql_port) if mssql_port else None,       # 50522
+        database=mssql_db,
+        query={
+            "driver": mssql_driver,
+            "TrustServerCertificate": "yes",
+        },
+    )
+
+    app.config["SQLALCHEMY_DATABASE_URI"] = database_url.render_as_string(
+        hide_password=False
+    )
+    app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
+
+    app.config["SQLALCHEMY_ENGINE_OPTIONS"] = {
+        "pool_pre_ping": True,
+        "pool_recycle": 1800,
+        "pool_size": 10,
+        "max_overflow": 20,
+        "pool_timeout": 30,
+    }
+
+    db.init_app(app)
+    DB_READY = True
+
+else:
+    _logging.warning(
+        "⚠️ Database environment variables not fully set. DB not initialized."
+    )
+# ----------------------------------------------------------
+# CORS — restrict to explicit allowed origins in production.
+# Set CORS_ORIGINS env var to a comma-separated list of allowed
+# origins, e.g. "https://myapp.com,https://www.myapp.com".
+# Defaults to "*" only when FLASK_ENV=development.
+# Note: browsers reject credentials=True with wildcard origins,
+# so an explicit origin list is required for credentialed requests.
+# ----------------------------------------------------------
+if CORS:
+    _raw_origins = os.getenv("CORS_ORIGINS", "")
+    if _raw_origins:
+        _allowed_origins = [o.strip() for o in _raw_origins.split(",") if o.strip()]
+    elif os.getenv("FLASK_ENV", "production") == "development":
+        _allowed_origins = "*"
+    else:
+        _allowed_origins = []  # no cross-origin access unless configured
+    CORS(app, resources={r"/*": {"origins": _allowed_origins}}, supports_credentials=True)
+
+# ----------------------------------------------------------
+# ProxyFix — trust one level of reverse-proxy headers so that
+# request.remote_addr and request.scheme are correct behind
+# Nginx, Azure App Service, AWS ALB, etc.
+# ----------------------------------------------------------
+app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_prefix=1)
+
+def ensure_questionnaire_tables():
+    try:
+        def _col_exists(table_name: str, column_name: str) -> bool:
+            row = db.session.execute(sql_text("""
+                SELECT COUNT(*) AS cnt
+                FROM information_schema.columns
+                WHERE table_catalog = DB_NAME()
+                  AND table_name = :t
+                  AND column_name = :c
+            """), {"t": table_name, "c": column_name}).mappings().fetchone()
+            return row and int(row["cnt"]) > 0
+
+        ddl = [
+            # questionnaire_sections
+            """
+            IF OBJECT_ID('dbo.questionnaire_sections', 'U') IS NULL
+            CREATE TABLE questionnaire_sections (
+                section_id INT IDENTITY(1,1) NOT NULL,
+                section_order INT NOT NULL,
+                section_title NVARCHAR(255) NOT NULL,
+                created_at DATETIME2 DEFAULT GETDATE(),
+                updated_at DATETIME2 DEFAULT GETDATE(),
+                PRIMARY KEY (section_id),
+                CONSTRAINT uk_section_order UNIQUE (section_order),
+                CONSTRAINT uk_section_title UNIQUE (section_title)
+            );
+            """,
+            """
+            IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'idx_section_order'
+                           AND object_id = OBJECT_ID('dbo.questionnaire_sections'))
+                CREATE INDEX idx_section_order ON questionnaire_sections (section_order);
+            """,
+            # questions
+            """
+            IF OBJECT_ID('dbo.questions', 'U') IS NULL
+            CREATE TABLE questions (
+                question_id INT IDENTITY(1,1) NOT NULL,
+                question_order INT NOT NULL,
+                question_section_id INT DEFAULT NULL,
+                question_text NVARCHAR(MAX) NOT NULL,
+                question_type NVARCHAR(50) NOT NULL,
+                answer_type NVARCHAR(20) NOT NULL,
+                options NVARCHAR(MAX) NULL,
+                parent_id INT NULL,
+                trigger_value NVARCHAR(255) NULL,
+                created_at DATETIME2 DEFAULT GETDATE(),
+                updated_at DATETIME2 DEFAULT GETDATE(),
+                PRIMARY KEY (question_id),
+                CONSTRAINT uk_question_order UNIQUE (question_order),
+                CONSTRAINT fk_question_section
+                    FOREIGN KEY (question_section_id)
+                    REFERENCES questionnaire_sections(section_id)
+                    ON DELETE CASCADE,
+                CONSTRAINT fk_parent_question
+                    FOREIGN KEY (parent_id)
+                    REFERENCES questions(question_id),
+                CONSTRAINT chk_question_type CHECK (question_type IN ('multiple_choice', 'single_choice', 'open_ended')),
+                CONSTRAINT chk_answer_type CHECK (answer_type IN ('text', 'numerical'))
+            );
+            """,
+            """
+            IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'idx_question_order'
+                           AND object_id = OBJECT_ID('dbo.questions'))
+                CREATE INDEX idx_question_order ON questions (question_order);
+            """,
+            """
+            IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'idx_question_section_id'
+                           AND object_id = OBJECT_ID('dbo.questions'))
+                CREATE INDEX idx_question_section_id ON questions (question_section_id);
+            """,
+            """
+            IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'idx_questions_parent'
+                           AND object_id = OBJECT_ID('dbo.questions'))
+                CREATE INDEX idx_questions_parent ON questions (parent_id);
+            """,
+            # individual_questionnaire_sections
+            """
+            IF OBJECT_ID('dbo.individual_questionnaire_sections', 'U') IS NULL
+            CREATE TABLE individual_questionnaire_sections (
+                section_id INT IDENTITY(1,1) NOT NULL,
+                section_order INT NOT NULL,
+                section_title NVARCHAR(255) NOT NULL,
+                created_at DATETIME2 DEFAULT GETDATE(),
+                updated_at DATETIME2 DEFAULT GETDATE(),
+                PRIMARY KEY (section_id),
+                CONSTRAINT uk_individual_section_order UNIQUE (section_order),
+                CONSTRAINT uk_individual_section_title UNIQUE (section_title)
+            );
+            """,
+            """
+            IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'idx_individual_section_order'
+                           AND object_id = OBJECT_ID('dbo.individual_questionnaire_sections'))
+                CREATE INDEX idx_individual_section_order ON individual_questionnaire_sections (section_order);
+            """,
+            # individual_questions
+            """
+            IF OBJECT_ID('dbo.individual_questions', 'U') IS NULL
+            CREATE TABLE individual_questions (
+                question_id INT IDENTITY(1,1) NOT NULL,
+                question_order INT NOT NULL,
+                question_section_id INT DEFAULT NULL,
+                question_text NVARCHAR(MAX) NOT NULL,
+                question_type NVARCHAR(50) NOT NULL,
+                answer_type NVARCHAR(20) NOT NULL,
+                options NVARCHAR(MAX) NULL,
+                parent_id INT NULL,
+                trigger_value NVARCHAR(255) NULL,
+                created_at DATETIME2 DEFAULT GETDATE(),
+                updated_at DATETIME2 DEFAULT GETDATE(),
+                PRIMARY KEY (question_id),
+                CONSTRAINT uk_individual_question_order UNIQUE (question_order),
+                CONSTRAINT fk_individual_question_section
+                    FOREIGN KEY (question_section_id)
+                    REFERENCES individual_questionnaire_sections(section_id)
+                    ON DELETE CASCADE,
+                CONSTRAINT fk_individual_parent_question
+                    FOREIGN KEY (parent_id)
+                    REFERENCES individual_questions(question_id),
+                CONSTRAINT chk_individual_question_type CHECK (question_type IN ('multiple_choice', 'single_choice', 'open_ended')),
+                CONSTRAINT chk_individual_answer_type CHECK (answer_type IN ('text', 'numerical'))
+            );
+            """,
+            """
+            IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'idx_individual_question_order'
+                           AND object_id = OBJECT_ID('dbo.individual_questions'))
+                CREATE INDEX idx_individual_question_order ON individual_questions (question_order);
+            """,
+            """
+            IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'idx_individual_question_section_id'
+                           AND object_id = OBJECT_ID('dbo.individual_questions'))
+                CREATE INDEX idx_individual_question_section_id ON individual_questions (question_section_id);
+            """,
+            """
+            IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'idx_individual_questions_parent'
+                           AND object_id = OBJECT_ID('dbo.individual_questions'))
+                CREATE INDEX idx_individual_questions_parent ON individual_questions (parent_id);
+            """,
+            # main_questionnaire_responses
+            """
+            IF OBJECT_ID('dbo.main_questionnaire_responses', 'U') IS NULL
+            CREATE TABLE main_questionnaire_responses (
+                main_questionnaire_id BIGINT IDENTITY(1,1) NOT NULL,
+                household_id INT NOT NULL,
+                user_id INT NOT NULL,
+                responses NVARCHAR(MAX) NOT NULL,
+                created_at DATETIME2 DEFAULT GETDATE(),
+                PRIMARY KEY (main_questionnaire_id),
+                CONSTRAINT fk_main_questionnaire_household
+                    FOREIGN KEY (household_id) REFERENCES households(household_id)
+                    ON DELETE CASCADE,
+                CONSTRAINT fk_main_questionnaire_user
+                    FOREIGN KEY (user_id) REFERENCES users(user_id)
+                    ON DELETE NO ACTION
+            );
+            """,
+            """
+            IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'idx_main_questionnaire_household'
+                           AND object_id = OBJECT_ID('dbo.main_questionnaire_responses'))
+                CREATE INDEX idx_main_questionnaire_household ON main_questionnaire_responses (household_id);
+            """,
+            """
+            IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'idx_main_questionnaire_user'
+                           AND object_id = OBJECT_ID('dbo.main_questionnaire_responses'))
+                CREATE INDEX idx_main_questionnaire_user ON main_questionnaire_responses (user_id);
+            """,
+            # survey_contributors
+            """
+            IF OBJECT_ID('dbo.survey_contributors', 'U') IS NULL
+            CREATE TABLE survey_contributors (
+                contributor_id BIGINT IDENTITY(1,1) NOT NULL,
+                main_questionnaire_id BIGINT NOT NULL,
+                user_id INT NOT NULL,
+                contributed_at DATETIME2 DEFAULT GETDATE(),
+                PRIMARY KEY (contributor_id),
+                CONSTRAINT uk_contributor_main_user UNIQUE (main_questionnaire_id, user_id),
+                CONSTRAINT fk_contrib_main
+                    FOREIGN KEY (main_questionnaire_id)
+                    REFERENCES main_questionnaire_responses(main_questionnaire_id)
+                    ON DELETE CASCADE,
+                CONSTRAINT fk_contrib_user
+                    FOREIGN KEY (user_id) REFERENCES users(user_id)
+                    ON DELETE NO ACTION
+            );
+            """,
+            """
+            IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'idx_contrib_main'
+                           AND object_id = OBJECT_ID('dbo.survey_contributors'))
+                CREATE INDEX idx_contrib_main ON survey_contributors (main_questionnaire_id);
+            """,
+            """
+            IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'idx_contrib_user'
+                           AND object_id = OBJECT_ID('dbo.survey_contributors'))
+                CREATE INDEX idx_contrib_user ON survey_contributors (user_id);
+            """,
+            # individual_questionnaire_responses
+            """
+            IF OBJECT_ID('dbo.individual_questionnaire_responses', 'U') IS NULL
+            CREATE TABLE individual_questionnaire_responses (
+                individual_questionnaire_id BIGINT IDENTITY(1,1) NOT NULL,
+                responses NVARCHAR(MAX) NOT NULL,
+                created_at DATETIME2 DEFAULT GETDATE(),
+                PRIMARY KEY (individual_questionnaire_id)
+            );
+            """,
+            # main_individual_questionnaire_links
+            """
+            IF OBJECT_ID('dbo.main_individual_questionnaire_links', 'U') IS NULL
+            CREATE TABLE main_individual_questionnaire_links (
+                link_id BIGINT IDENTITY(1,1) NOT NULL,
+                main_questionnaire_id BIGINT NOT NULL,
+                individual_questionnaire_id BIGINT NOT NULL,
+                household_id INT NOT NULL,
+                filled_by_user_id INT NOT NULL,
+                created_at DATETIME2 DEFAULT GETDATE(),
+                PRIMARY KEY (link_id),
+                CONSTRAINT fk_link_main
+                    FOREIGN KEY (main_questionnaire_id)
+                    REFERENCES main_questionnaire_responses(main_questionnaire_id)
+                    ON DELETE CASCADE,
+                CONSTRAINT fk_link_individual
+                    FOREIGN KEY (individual_questionnaire_id)
+                    REFERENCES individual_questionnaire_responses(individual_questionnaire_id)
+                    ON DELETE NO ACTION,
+                CONSTRAINT fk_link_household
+                    FOREIGN KEY (household_id) REFERENCES households(household_id)
+                    ON DELETE NO ACTION,
+                CONSTRAINT fk_link_user
+                    FOREIGN KEY (filled_by_user_id) REFERENCES users(user_id)
+                    ON DELETE NO ACTION
+            );
+            """,
+            """
+            IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'idx_link_main'
+                           AND object_id = OBJECT_ID('dbo.main_individual_questionnaire_links'))
+                CREATE INDEX idx_link_main ON main_individual_questionnaire_links (main_questionnaire_id);
+            """,
+            """
+            IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'idx_link_individual'
+                           AND object_id = OBJECT_ID('dbo.main_individual_questionnaire_links'))
+                CREATE INDEX idx_link_individual ON main_individual_questionnaire_links (individual_questionnaire_id);
+            """,
+            """
+            IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'idx_link_household'
+                           AND object_id = OBJECT_ID('dbo.main_individual_questionnaire_links'))
+                CREATE INDEX idx_link_household ON main_individual_questionnaire_links (household_id);
+            """,
+            # household_response_drafts
+            """
+            IF OBJECT_ID('dbo.household_response_drafts', 'U') IS NULL
+            CREATE TABLE household_response_drafts (
+                draft_id BIGINT IDENTITY(1,1) NOT NULL,
+                household_id INT NOT NULL,
+                user_id INT NOT NULL,
+                response_data NVARCHAR(MAX) NULL,
+                updated_at DATETIME2 DEFAULT GETDATE(),
+                PRIMARY KEY (draft_id),
+                CONSTRAINT uk_draft_household_user UNIQUE (household_id, user_id),
+                CONSTRAINT fk_draft_household
+                    FOREIGN KEY (household_id) REFERENCES households(household_id)
+                    ON DELETE CASCADE,
+                CONSTRAINT fk_draft_user
+                    FOREIGN KEY (user_id) REFERENCES users(user_id)
+                    ON DELETE NO ACTION
+            );
+            """,
+            """
+            IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'idx_draft_household'
+                           AND object_id = OBJECT_ID('dbo.household_response_drafts'))
+                CREATE INDEX idx_draft_household ON household_response_drafts (household_id);
+            """,
+            """
+            IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'idx_draft_user'
+                           AND object_id = OBJECT_ID('dbo.household_response_drafts'))
+                CREATE INDEX idx_draft_user ON household_response_drafts (user_id);
+            """
+        ]
+
+        for stmt in ddl:
+            db.session.execute(sql_text(stmt))
+
+        # Backfill missing columns on legacy main questionnaire table
+        if not _col_exists("questions", "options"):
+            db.session.execute(sql_text("ALTER TABLE questions ADD options NVARCHAR(MAX) NULL"))
+        if not _col_exists("questions", "parent_id"):
+            db.session.execute(sql_text("ALTER TABLE questions ADD parent_id INT NULL"))
+        if not _col_exists("questions", "trigger_value"):
+            db.session.execute(sql_text("ALTER TABLE questions ADD trigger_value NVARCHAR(255) NULL"))
+        if not _col_exists("questions", "is_mandatory"):
+            db.session.execute(sql_text("ALTER TABLE questions ADD is_mandatory BIT NULL"))
+        if not _col_exists("individual_questions", "is_mandatory"):
+            db.session.execute(sql_text("ALTER TABLE individual_questions ADD is_mandatory BIT NULL"))
+        if not _col_exists("questionnaire_sections", "show_on_user_end"):
+            db.session.execute(sql_text("ALTER TABLE questionnaire_sections ADD show_on_user_end BIT NOT NULL DEFAULT(1)"))
+        if not _col_exists("individual_questionnaire_sections", "show_on_user_end"):
+            db.session.execute(sql_text("ALTER TABLE individual_questionnaire_sections ADD show_on_user_end BIT NOT NULL DEFAULT(1)"))
+
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+        app.logger.error("ERROR ENSURING QUESTIONNAIRE TABLES", exc_info=True)
+
+def ensure_household_name_unique_index():
+    try:
+        def _col_exists(table_name: str, column_name: str) -> bool:
+            row = db.session.execute(sql_text("""
+                SELECT COUNT(*) AS cnt
+                FROM information_schema.columns
+                WHERE table_catalog = DB_NAME()
+                  AND table_name = :t
+                  AND column_name = :c
+            """), {"t": table_name, "c": column_name}).mappings().fetchone()
+            return row and int(row["cnt"]) > 0
+
+        # Skip if duplicates already exist (would break unique index creation)
+        dup = db.session.execute(sql_text("""
+            SELECT TOP 1 LOWER(name) AS n, COUNT(*) AS c
+            FROM households
+            GROUP BY LOWER(name)
+            HAVING COUNT(*) > 1
+        """)).mappings().fetchone()
+        if dup:
+            app.logger.warning("Duplicate household names found; unique index not created")
+            return
+
+        # Add normalized computed column for case-insensitive uniqueness
+        if not _col_exists("households", "name_ci"):
+            db.session.execute(sql_text("""
+                ALTER TABLE households
+                ADD name_ci AS (LOWER(name)) PERSISTED
+            """))
+
+        idx = db.session.execute(sql_text("""
+            SELECT TOP 1 1
+            FROM sys.indexes i
+            JOIN sys.objects o ON i.object_id = o.object_id
+            WHERE o.name = 'households'
+              AND i.name = 'uk_households_name_ci'
+        """)).mappings().fetchone()
+        if not idx:
+            db.session.execute(sql_text("""
+                CREATE UNIQUE INDEX uk_households_name_ci ON households (name_ci)
+            """))
+
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+        app.logger.error("ERROR ENSURING HOUSEHOLD UNIQUE INDEX", exc_info=True)
+
+
+def ensure_aadhar_storage_columns():
+    try:
+        def _col_exists(table_name: str, column_name: str) -> bool:
+            row = db.session.execute(sql_text("""
+                SELECT COUNT(*) AS cnt
+                FROM information_schema.columns
+                WHERE table_catalog = DB_NAME()
+                  AND table_name = :t
+                  AND column_name = :c
+            """), {"t": table_name, "c": column_name}).mappings().fetchone()
+            return row and int(row["cnt"]) > 0
+
+        def _idx_exists(table_name: str, index_name: str) -> bool:
+            row = db.session.execute(sql_text("""
+                SELECT TOP 1 1
+                FROM sys.indexes i
+                JOIN sys.objects o ON i.object_id = o.object_id
+                WHERE o.name = :t
+                  AND i.name = :i
+            """), {"t": table_name, "i": index_name}).mappings().fetchone()
+            return bool(row)
+
+        if _col_exists("persons", "aadhar") and not _col_exists("persons", "aadhar_hash"):
+            db.session.execute(sql_text("""
+                ALTER TABLE persons
+                ADD aadhar_hash NVARCHAR(64) NULL
+            """))
+        if _col_exists("persons", "aadhar_hash") and not _idx_exists("persons", "idx_persons_aadhar_hash"):
+            db.session.execute(sql_text("""
+                CREATE INDEX idx_persons_aadhar_hash ON persons (aadhar_hash)
+            """))
+
+        if not _col_exists("individual_questionnaire_responses", "aadhar_hash"):
+            db.session.execute(sql_text("""
+                ALTER TABLE individual_questionnaire_responses
+                ADD aadhar_hash NVARCHAR(64) NULL
+            """))
+        if _col_exists("individual_questionnaire_responses", "aadhar_hash") and not _idx_exists("individual_questionnaire_responses", "idx_iqr_aadhar_hash"):
+            db.session.execute(sql_text("""
+                CREATE INDEX idx_iqr_aadhar_hash ON individual_questionnaire_responses (aadhar_hash)
+            """))
+
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+        app.logger.error("ERROR ENSURING AADHAAR STORAGE COLUMNS", exc_info=True)
+
+
+def ensure_household_registry_table():
+    try:
+        db.session.execute(sql_text("""
+            IF OBJECT_ID('dbo.household_registry', 'U') IS NULL
+            CREATE TABLE household_registry (
+                registry_id INT IDENTITY(1,1) NOT NULL,
+                household_code NVARCHAR(255) NOT NULL,
+                code_ci AS (LOWER(household_code)) PERSISTED,
+                village_id INT NOT NULL,
+                created_at DATETIME2 DEFAULT GETDATE(),
+                updated_at DATETIME2 DEFAULT GETDATE(),
+                PRIMARY KEY (registry_id),
+                CONSTRAINT uk_household_registry_code_ci UNIQUE (code_ci),
+                CONSTRAINT fk_household_registry_village
+                    FOREIGN KEY (village_id) REFERENCES villages(village_id)
+                    ON DELETE NO ACTION
+            );
+        """))
+        db.session.execute(sql_text("""
+            IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'idx_household_registry_village'
+                           AND object_id = OBJECT_ID('dbo.household_registry'))
+                CREATE INDEX idx_household_registry_village ON household_registry (village_id);
+        """))
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+        app.logger.error("ERROR ENSURING HOUSEHOLD REGISTRY TABLE", exc_info=True)
+
+
+def ensure_response_history_tables():
+    try:
+        db.session.execute(sql_text("""
+            IF OBJECT_ID('dbo.main_questionnaire_response_history', 'U') IS NULL
+            CREATE TABLE main_questionnaire_response_history (
+                history_id BIGINT IDENTITY(1,1) NOT NULL,
+                main_questionnaire_id BIGINT NOT NULL,
+                household_id INT NULL,
+                changed_by_user_id INT NULL,
+                changed_by_username NVARCHAR(255) NULL,
+                change_action NVARCHAR(100) NOT NULL,
+                previous_responses NVARCHAR(MAX) NULL,
+                changed_at DATETIME2 DEFAULT GETDATE(),
+                PRIMARY KEY (history_id)
+            );
+        """))
+        db.session.execute(sql_text("""
+            IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'idx_mqrh_main_id'
+                           AND object_id = OBJECT_ID('dbo.main_questionnaire_response_history'))
+                CREATE INDEX idx_mqrh_main_id ON main_questionnaire_response_history (main_questionnaire_id);
+        """))
+
+        db.session.execute(sql_text("""
+            IF OBJECT_ID('dbo.household_response_draft_history', 'U') IS NULL
+            CREATE TABLE household_response_draft_history (
+                history_id BIGINT IDENTITY(1,1) NOT NULL,
+                draft_id BIGINT NULL,
+                household_id INT NOT NULL,
+                changed_by_user_id INT NULL,
+                changed_by_username NVARCHAR(255) NULL,
+                change_action NVARCHAR(100) NOT NULL,
+                previous_response_data NVARCHAR(MAX) NULL,
+                changed_at DATETIME2 DEFAULT GETDATE(),
+                PRIMARY KEY (history_id)
+            );
+        """))
+        db.session.execute(sql_text("""
+            IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'idx_hrdh_household_id'
+                           AND object_id = OBJECT_ID('dbo.household_response_draft_history'))
+                CREATE INDEX idx_hrdh_household_id ON household_response_draft_history (household_id);
+        """))
+
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+        app.logger.error("ERROR ENSURING RESPONSE HISTORY TABLES", exc_info=True)
+
+with app.app_context():
+    ensure_questionnaire_tables()
+    ensure_household_name_unique_index()
+    ensure_aadhar_storage_columns()
+    ensure_household_registry_table()
+    ensure_response_history_tables()
+
+
+# ==========================================================
+# HELPERS / GUARDS
+# ==========================================================
+
+def role_required(role: str):
+    def deco(f):
+        @wraps(f)
+        def wrap(*args, **kwargs):
+            if session.get("role") != role:
+                if role == "user":
+                    return redirect(url_for("user_login"))
+                if role == "admin":
+                    return redirect(url_for("admin_login"))
+                return jsonify({"error": "Unauthorized"}), 401
+            return f(*args, **kwargs)
+        return wrap
+    return deco
+
+
+def json_body():
+    return request.get_json(silent=True) or {}
+
+
+def safe_int(val, default=None):
+    try:
+        if val is None or val == "":
+            return default
+        return int(val)
+    except Exception:
+        return default
+
+
+def to_bool_flag(value, default=1):
+    if value is None:
+        return 1 if default else 0
+    if isinstance(value, bool):
+        return 1 if value else 0
+    if isinstance(value, (int, float)):
+        return 1 if int(value) != 0 else 0
+    if isinstance(value, str):
+        v = value.strip().lower()
+        if v in ("1", "true", "yes", "y", "on"):
+            return 1
+        if v in ("0", "false", "no", "n", "off", ""):
+            return 0
+    return 1 if default else 0
+
+
+def _verify_admin_credentials(username, password):
+    """Return admin_id when credentials are valid, otherwise None."""
+    uname = (username or "").strip()
+    pwd = password or ""
+    if not uname or not pwd:
+        return None
+    row = db.session.execute(
+        sql_text("SELECT TOP 1 admin_id, password_hash FROM admins WHERE username=:u"),
+        {"u": uname},
+    ).mappings().fetchone()
+    if not row:
+        return None
+    if check_password_hash(row["password_hash"], pwd):
+        return row["admin_id"]
+    return None
+
+
+def json_error(msg, status=500, details=None):
+    """Return a JSON error response.
+
+    ``details`` (e.g. a full traceback string) is ALWAYS logged server-side
+    via app.logger but is ONLY included in the response body when running in
+    development mode.  This prevents leaking internal information (SQL, file
+    paths, stack traces) to clients in production.
+    """
+    if details:
+        app.logger.error("%s | %s", msg, details)
+    elif status >= 500:
+        # Log the current exception context if available
+        app.logger.error(msg, exc_info=True)
+
+    _dev = os.getenv("FLASK_ENV", "production") == "development"
+    payload = {"success": False, "error": msg}
+    if details and _dev:
+        payload["details"] = details
+    return jsonify(payload), status
+
+
+def safe_json_load(val):
+    try:
+        return json.loads(val) if isinstance(val, str) else val
+    except Exception:
+        # Treat malformed JSON text as missing payload instead of returning raw text.
+        return None
+
+
+def _extract_status(payload):
+    if isinstance(payload, dict):
+        return payload.get("status")
+    return None
+
+
+def _is_completed_main_status(status):
+    # Completed states used across legacy and current submission flows.
+    return str(status or "").strip().lower() in {"submitted", "household_submitted", "fully_completed"}
+
+
+def _combine_draft_sections(draft_payload):
+    combined = {}
+    for sec in (draft_payload or {}).get("sections", {}).values():
+        sec_resp = (sec or {}).get("responses") or {}
+        if isinstance(sec_resp, dict):
+            combined.update(sec_resp)
+    return combined
+
+
+def _safe_int_set(values):
+    out = set()
+    for v in values or []:
+        iv = safe_int(v)
+        if iv is not None:
+            out.add(iv)
+    return out
+
+
+def _main_section_ids():
+    try:
+        rows = db.session.execute(sql_text("""
+            SELECT section_id
+            FROM questionnaire_sections
+            WHERE COALESCE(show_on_user_end, 1) = 1
+            ORDER BY section_order
+        """)).mappings().all()
+    except Exception:
+        rows = db.session.execute(sql_text("""
+            SELECT section_id
+            FROM questionnaire_sections
+            ORDER BY section_order
+        """)).mappings().all()
+    return [int(r["section_id"]) for r in rows]
+
+
+def _section_completion_from_draft(draft_payload, all_section_ids):
+    draft = draft_payload if isinstance(draft_payload, dict) else {}
+    sections_map = draft.get("sections") or {}
+    if not isinstance(sections_map, dict):
+        sections_map = {}
+    survey_state = draft.get("survey_state") or {}
+    if not isinstance(survey_state, dict):
+        survey_state = {}
+
+    completed_ids = set()
+    skipped_ids = set()
+
+    for raw_sid, sec in sections_map.items():
+        sid = safe_int(raw_sid)
+        if sid is None:
+            continue
+        sec_obj = sec if isinstance(sec, dict) else {}
+        is_skipped = bool(sec_obj.get("is_skipped"))
+        if is_skipped:
+            skipped_ids.add(sid)
+        else:
+            completed_ids.add(sid)
+
+    skipped_ids |= _safe_int_set(survey_state.get("skippedSectionIds"))
+    completed_ids -= skipped_ids
+
+    all_ids = set(all_section_ids or [])
+    pending_ids = sorted(all_ids - completed_ids)
+    return {
+        "completed_ids": sorted(completed_ids),
+        "skipped_ids": sorted(skipped_ids),
+        "pending_ids": pending_ids,
+    }
+
+
+def _has_answer_value(value):
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return value.strip() != ""
+    if isinstance(value, (list, tuple, set)):
+        return len(value) > 0
+    return True
+
+
+def _to_value_tokens(value):
+    if value is None:
+        return set()
+    if isinstance(value, (list, tuple, set)):
+        values = value
+    else:
+        values = [value]
+
+    tokens = set()
+    for item in values:
+        if item is None:
+            continue
+        text = str(item).strip()
+        if not text:
+            continue
+        tokens.add(text.lower())
+    return tokens
+
+
+def _question_is_applicable(question_id, question_meta, responses_map, seen=None):
+    if seen is None:
+        seen = set()
+    if question_id in seen:
+        return False
+    seen.add(question_id)
+
+    meta = question_meta.get(question_id) or {}
+    parent_id = safe_int(meta.get("parent_id"))
+    trigger_value = (meta.get("trigger_value") or "").strip()
+
+    if not parent_id:
+        return True
+    if not _question_is_applicable(parent_id, question_meta, responses_map, seen):
+        return False
+
+    parent_val = responses_map.get(str(parent_id))
+    if parent_val is None:
+        parent_val = responses_map.get(parent_id)
+    if not _has_answer_value(parent_val):
+        return False
+    if not trigger_value:
+        return True
+
+    parent_tokens = _to_value_tokens(parent_val)
+    return trigger_value.lower() in parent_tokens
+
+
+def _answered_section_ids_from_responses(all_section_ids, responses_map, include_details=False):
+    if not isinstance(responses_map, dict):
+        return (set(), {}) if include_details else set()
+
+    section_ids = set(all_section_ids or [])
+    if not section_ids:
+        return (set(), {}) if include_details else set()
+
+    try:
+        rows = db.session.execute(sql_text("""
+            SELECT
+                q.question_section_id AS section_id,
+                q.question_id,
+                q.parent_id,
+                q.trigger_value,
+                COALESCE(q.is_mandatory, 0) AS is_mandatory
+            FROM questions q
+            JOIN questionnaire_sections s ON s.section_id = q.question_section_id
+            WHERE COALESCE(s.show_on_user_end, 1) = 1
+        """)).mappings().all()
+    except Exception:
+        rows = db.session.execute(sql_text("""
+            SELECT
+                q.question_section_id AS section_id,
+                q.question_id,
+                q.parent_id,
+                q.trigger_value,
+                COALESCE(q.is_mandatory, 0) AS is_mandatory
+            FROM questions q
+        """)).mappings().all()
+
+    section_questions = {sid: set() for sid in section_ids}
+    section_mandatory_questions = {sid: set() for sid in section_ids}
+    question_meta = {}
+    for r in rows:
+        sid = safe_int(r.get("section_id"))
+        qid = safe_int(r.get("question_id"))
+        if sid in section_questions and qid is not None:
+            section_questions[sid].add(qid)
+            question_meta[qid] = {
+                "parent_id": safe_int(r.get("parent_id")),
+                "trigger_value": r.get("trigger_value"),
+            }
+            if safe_int(r.get("is_mandatory"), 0) == 1:
+                section_mandatory_questions[sid].add(qid)
+
+    completed = set()
+    details = {}
+    for sid, qids in section_questions.items():
+        if not qids:
+            completed.add(sid)
+            details[sid] = {
+                "applicable_mandatory_question_ids": [],
+                "missing_mandatory_question_ids": [],
+            }
+            continue
+
+        mandatory_qids = section_mandatory_questions.get(sid) or set()
+        if not mandatory_qids:
+            completed.add(sid)
+            details[sid] = {
+                "applicable_mandatory_question_ids": [],
+                "missing_mandatory_question_ids": [],
+            }
+            continue
+
+        applicable_mandatory_qids = []
+        missing_mandatory_qids = []
+        for qid in mandatory_qids:
+            if not _question_is_applicable(qid, question_meta, responses_map):
+                continue
+
+            applicable_mandatory_qids.append(qid)
+
+            val = responses_map.get(str(qid))
+            if val is None:
+                val = responses_map.get(qid)
+            if not _has_answer_value(val):
+                missing_mandatory_qids.append(qid)
+
+        details[sid] = {
+            "applicable_mandatory_question_ids": sorted(applicable_mandatory_qids),
+            "missing_mandatory_question_ids": sorted(missing_mandatory_qids),
+        }
+
+        if not missing_mandatory_qids:
+            completed.add(sid)
+
+    if include_details:
+        return completed, details
+    return completed
+
+
+def _admin_household_status(main_payload, draft_payload, all_section_ids):
+    main_obj = main_payload if isinstance(main_payload, dict) else {}
+    status = _extract_status(main_obj)
+
+    completion = _section_completion_from_draft(draft_payload, all_section_ids)
+    skipped_count = len(completion["skipped_ids"])
+    pending_count = len(completion["pending_ids"])
+    completed_count = len(completion["completed_ids"])
+    total_count = len(all_section_ids or [])
+
+    if _is_completed_main_status(status):
+        label = "Completed"
+    elif status == "household_submitted":
+        label = "Main Submitted"
+    elif pending_count > 0:
+        label = f"Pending ({pending_count}/{total_count} sections)"
+    elif completed_count > 0:
+        label = "In Progress"
+    else:
+        label = "Not Started"
+
+    if skipped_count > 0 and not _is_completed_main_status(status):
+        label += f" - Skipped {skipped_count}"
+
+    return {
+        "questionnaire_status": label,
+        "pending_sections_count": pending_count,
+        "skipped_sections_count": skipped_count,
+        "completed_sections_count": completed_count,
+        "total_sections_count": total_count,
+    }
+
+
+def _to_json_text(value):
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return value
+    try:
+        return json.dumps(value)
+    except Exception:
+        return str(value)
+
+
+def _log_main_response_history(main_questionnaire_id, previous_responses, action, household_id=None, user_id=None, username=None):
+    if not main_questionnaire_id:
+        return
+    db.session.execute(sql_text("""
+        INSERT INTO main_questionnaire_response_history
+        (main_questionnaire_id, household_id, changed_by_user_id, changed_by_username, change_action, previous_responses)
+        VALUES (:mid, :hid, :uid, :uname, :action, :prev)
+    """), {
+        "mid": main_questionnaire_id,
+        "hid": household_id,
+        "uid": user_id,
+        "uname": username,
+        "action": action,
+        "prev": _to_json_text(previous_responses),
+    })
+
+
+def _log_draft_history(draft_id, household_id, previous_response_data, action, user_id=None, username=None):
+    if not household_id:
+        return
+    db.session.execute(sql_text("""
+        INSERT INTO household_response_draft_history
+        (draft_id, household_id, changed_by_user_id, changed_by_username, change_action, previous_response_data)
+        VALUES (:did, :hid, :uid, :uname, :action, :prev)
+    """), {
+        "did": draft_id,
+        "hid": household_id,
+        "uid": user_id,
+        "uname": username,
+        "action": action,
+        "prev": _to_json_text(previous_response_data),
+    })
+
+
+def _ensure_survey_contributor(main_questionnaire_id, user_id):
+    if not main_questionnaire_id or not user_id:
+        return
+    db.session.execute(sql_text("""
+        IF NOT EXISTS (
+            SELECT 1 FROM survey_contributors
+            WHERE main_questionnaire_id = :mid AND user_id = :uid
+        )
+            INSERT INTO survey_contributors (main_questionnaire_id, user_id)
+            VALUES (:mid, :uid)
+    """), {"mid": main_questionnaire_id, "uid": user_id})
+
+
+def _reopen_main_submission(main_questionnaire_id, payload, user_id, username):
+    _log_main_response_history(
+        main_questionnaire_id,
+        payload,
+        action="reopen_main_submission",
+        user_id=user_id,
+        username=username,
+    )
+    data = payload if isinstance(payload, dict) else {}
+    data["status"] = "draft"
+    data["reopened_at"] = datetime.now().isoformat()
+    data["reopened_by_user_id"] = user_id
+    data["reopened_by_username"] = username
+    db.session.execute(sql_text("""
+        UPDATE main_questionnaire_responses
+        SET responses = :resp
+        WHERE main_questionnaire_id = :mid
+    """), {"resp": json.dumps(data), "mid": main_questionnaire_id})
+
+
+def _get_aadhar_enc_key():
+    key_raw = (os.environ.get("AADHAR_ENC_KEY") or "").strip()
+    if not key_raw:
+        raise RuntimeError("AADHAR_ENC_KEY is required for Aadhaar encryption")
+    # Accept hex (32 chars) or urlsafe base64
+    if len(key_raw) == 32 and all(c in "0123456789abcdefABCDEF" for c in key_raw):
+        key = bytes.fromhex(key_raw)
+    else:
+        key = base64.urlsafe_b64decode(key_raw.encode())
+    if len(key) != 16:
+        raise RuntimeError("AADHAR_ENC_KEY must decode to 16 bytes (128-bit)")
+    return key
+
+
+def _get_aadhar_hash_key():
+    key_raw = (os.environ.get("AADHAR_HASH_KEY") or "").strip()
+    if not key_raw:
+        # Fall back to encryption key if a dedicated hash key is not provided
+        return _get_aadhar_enc_key()
+    if len(key_raw) == 64 and all(c in "0123456789abcdefABCDEF" for c in key_raw):
+        return bytes.fromhex(key_raw)
+    return base64.urlsafe_b64decode(key_raw.encode())
+
+
+def encrypt_aadhar(plain):
+    if plain is None:
+        return None
+    if AESGCM is None:
+        raise RuntimeError("cryptography is required for Aadhaar encryption")
+    value = str(plain).strip()
+    if not value:
+        return ""
+    if value.startswith("v1:"):
+        return value
+    key = _get_aadhar_enc_key()
+    aes = AESGCM(key)
+    nonce = os.urandom(12)
+    ct = aes.encrypt(nonce, value.encode("utf-8"), None)
+    token = base64.urlsafe_b64encode(nonce + ct).decode("utf-8")
+    return f"v1:{token}"
+
+
+def decrypt_aadhar(enc):
+    if enc is None:
+        return None
+    value = str(enc)
+    if not value:
+        return ""
+    if not value.startswith("v1:"):
+        return value
+    if AESGCM is None:
+        raise RuntimeError("cryptography is required for Aadhaar decryption")
+    key = _get_aadhar_enc_key()
+    aes = AESGCM(key)
+    token = value[3:]
+    raw = base64.urlsafe_b64decode(token.encode("utf-8"))
+    nonce, ct = raw[:12], raw[12:]
+    plain = aes.decrypt(nonce, ct, None)
+    return plain.decode("utf-8")
+
+
+def hash_aadhar(plain):
+    if plain is None:
+        return None
+    value = "".join(ch for ch in str(plain) if ch.isdigit())
+    if not value:
+        return ""
+    key = _get_aadhar_hash_key()
+    return hmac.new(key, value.encode("utf-8"), hashlib.sha256).hexdigest()
+
+
+def csv_response(filename: str, rows, headers):
+    buf = io.StringIO()
+    writer = csv.DictWriter(buf, fieldnames=headers, extrasaction="ignore")
+    writer.writeheader()
+    for row in rows:
+        writer.writerow(row)
+    data = buf.getvalue()
+    return Response(
+        data,
+        mimetype="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f"attachment; filename={filename}"},
+    )
+
+
+def build_question_index(question_table: str, section_table: str):
+    rows = db.session.execute(sql_text(f"""
+        SELECT q.question_id, q.question_text, q.question_order,
+               q.question_section_id, s.section_title, s.section_order
+        FROM {question_table} q
+        LEFT JOIN {section_table} s ON s.section_id = q.question_section_id
+    """)).mappings().all()
+    index = {}
+    for r in rows:
+        index[str(r["question_id"])] = {
+            "question_id": r["question_id"],
+            "question_text": r["question_text"],
+            "question_order": r["question_order"],
+            "section_id": r["question_section_id"],
+            "section_title": r.get("section_title") or "Unknown Section",
+            "section_order": r.get("section_order") or 0,
+        }
+    return index
+
+
+def answer_to_str(val):
+    if isinstance(val, list):
+        return "; ".join(str(v) for v in val)
+    if val is None:
+        return ""
+    return str(val)
+
+
+def build_export_rows(
+    responses_map,
+    question_index,
+    survey_type,
+    household_id=None,
+    main_id=None,
+    individual_id=None,
+    submitted_at=None,
+    submitted_by=None,
+    member=None,
+):
+    if not isinstance(responses_map, dict):
+        return []
+    rows = []
+    member = member or {}
+    member_name = " ".join([member.get("first_name", ""), member.get("middle_name", ""), member.get("surname", "")]).strip()
+    member_aadhar = member.get("aadhar") or ""
+    for qid, answer in responses_map.items():
+        qmeta = question_index.get(str(qid), {})
+        rows.append({
+            "survey_type": survey_type,
+            "household_id": household_id or "",
+            "main_questionnaire_id": main_id or "",
+            "individual_questionnaire_id": individual_id or "",
+            "member_aadhar": member_aadhar,
+            "member_name": member_name,
+            "section_order": qmeta.get("section_order", 0),
+            "section_title": qmeta.get("section_title", "Unknown Section"),
+            "question_order": qmeta.get("question_order", 0),
+            "question_id": qmeta.get("question_id", qid),
+            "question_text": qmeta.get("question_text", ""),
+            "answer": answer_to_str(answer),
+            "submitted_at": submitted_at or "",
+            "submitted_by": submitted_by or "",
+        })
+    rows.sort(key=lambda r: (r.get("section_order", 0), r.get("question_order", 0), str(r.get("question_id", ""))))
+    return rows
+
+
+def build_wide_headers(question_index):
+    # Use question text with ID to keep headers unique and readable
+    ordered = sorted(
+        question_index.values(),
+        key=lambda r: (r.get("section_order", 0), r.get("question_order", 0), str(r.get("question_id", "")))
+    )
+    headers = []
+    mapping = {}
+    used = set()
+    for q in ordered:
+        qid = q.get("question_id")
+        text = (q.get("question_text") or "").strip()
+        base = f"{text} [ID:{qid}]" if text else f"Question [ID:{qid}]"
+        name = base
+        n = 2
+        while name in used:
+            name = f"{base} ({n})"
+            n += 1
+        used.add(name)
+        headers.append(name)
+        mapping[str(qid)] = name
+    return headers, mapping
+
+
+def build_wide_row(responses_map, header_map):
+    if not isinstance(responses_map, dict):
+        return {}
+    row = {}
+    for qid, answer in responses_map.items():
+        key = header_map.get(str(qid))
+        if not key:
+            continue
+        row[key] = answer_to_str(answer)
+    return row
+
+
+def column_exists(table_name: str, column_name: str) -> bool:
+    try:
+        row = db.session.execute(sql_text("""
+            SELECT COUNT(*) AS cnt
+            FROM information_schema.columns
+            WHERE table_catalog = DB_NAME()
+              AND table_name = :t
+              AND column_name = :c
+        """), {"t": table_name, "c": column_name}).mappings().fetchone()
+        return row and int(row["cnt"]) > 0
+    except Exception:
+        return False
+
+
+def column_is_auto_increment(table_name: str, column_name: str) -> bool:
+    try:
+        row = db.session.execute(sql_text("""
+            SELECT TOP 1 1 AS is_identity
+            FROM sys.identity_columns ic
+            JOIN sys.objects o ON ic.object_id = o.object_id
+            WHERE o.name = :t
+              AND ic.name = :c
+        """), {"t": table_name, "c": column_name}).mappings().fetchone()
+        return bool(row)
+    except Exception:
+        return False
+
+
+def table_exists(table_name: str) -> bool:
+    try:
+        row = db.session.execute(sql_text("""
+            SELECT TOP 1 1
+            FROM information_schema.tables
+            WHERE table_catalog = DB_NAME()
+              AND table_name = :t
+        """), {"t": table_name}).mappings().fetchone()
+        return bool(row)
+    except Exception:
+        return False
+
+
+def next_id(table_name: str, column_name: str) -> int:
+    row = db.session.execute(sql_text(f"""
+        SELECT COALESCE(MAX({column_name}), 0) + 1 AS next_id
+        FROM {table_name}
+    """)).mappings().fetchone()
+    return int(row["next_id"]) if row and "next_id" in row else 1
+
+
+def get_last_inserted_id() -> int:
+    """Return the last IDENTITY value inserted in the current session (MSSQL replacement for lastrowid)."""
+    row = db.session.execute(sql_text("SELECT SCOPE_IDENTITY() AS new_id")).mappings().fetchone()
+    val = row["new_id"] if row else None
+    return int(val) if val is not None else None
+
+
+def normalize_header_name(val: str) -> str:
+    raw = str(val or "").strip().lower()
+    return "".join(ch for ch in raw if ch.isalnum())
+
+
+def read_excel_rows(file_storage):
+    if not load_workbook:
+        raise RuntimeError("openpyxl not installed")
+    wb = load_workbook(file_storage, data_only=True)
+    ws = wb.active
+    rows = []
+    for row in ws.iter_rows(values_only=True):
+        if not row:
+            continue
+        rows.append([cell if cell is not None else "" for cell in row])
+    return rows
+
+
+def parse_bulk_rows(rows, level: str):
+    header_map = {
+        "state": "state",
+        "states": "state",
+        "statename": "state",
+        "district": "district",
+        "districts": "district",
+        "districtname": "district",
+        "block": "block",
+        "blocks": "block",
+        "blockname": "block",
+        "subcenter": "subcenter",
+        "subcentre": "subcenter",
+        "subcenters": "subcenter",
+        "subcentres": "subcenter",
+        "subcentername": "subcenter",
+        "subcentrename": "subcenter",
+        "village": "village",
+        "villages": "village",
+        "villagename": "village",
+        "lgd": "lgd",
+        "lgdcode": "lgd",
+        "villagelgd": "lgd",
+        "villagelgdcode": "lgd",
+        "villagelgdcodeid": "lgd",
+        "villagelgdcode": "lgd",
+        "villagelgd": "lgd",
+        "village_lgd_code": "lgd",
+        "household": "household",
+        "households": "household",
+        "householdid": "household",
+        "householdcode": "household",
+        "householdname": "household",
+        "householduid": "household",
+        "hhid": "household",
+    }
+
+    def has_header(first_row):
+        for cell in first_row:
+            if header_map.get(normalize_header_name(cell)):
+                return True
+        return False
+
+    def cell_to_str(v):
+        if v is None:
+            return ""
+        if isinstance(v, bool):
+            return "1" if v else "0"
+        if isinstance(v, float) and v.is_integer():
+            v = int(v)
+        return str(v).strip()
+
+    header = has_header(rows[0])
+    col_idx = {}
+    start_idx = 0
+    if header:
+        start_idx = 1
+        for i, cell in enumerate(rows[0]):
+            key = header_map.get(normalize_header_name(cell))
+            if key and key not in col_idx:
+                col_idx[key] = i
+
+    def get_val(row, key, pos):
+        idx = col_idx.get(key, pos)
+        if idx is None or idx >= len(row):
+            return ""
+        return cell_to_str(row[idx])
+
+    required_by_level = {
+        "states": ["state"],
+        "districts": ["state", "district"],
+        "blocks": ["state", "district", "block"],
+        "subcenters": ["state", "district", "block", "subcenter"],
+        "villages": ["state", "district", "block", "subcenter", "village"],
+        "households": ["state", "district", "block", "subcenter", "village", "household"],
+    }
+    positions = {
+        "state": 0,
+        "district": 1,
+        "block": 2,
+        "subcenter": 3,
+        "village": 4,
+        "lgd": 5,
+        "household": 5,
+    }
+
+    items = []
+    errors = []
+    for i in range(start_idx, len(rows)):
+        row = rows[i]
+        if not any(cell_to_str(c) for c in row):
+            continue
+        item = {"_row": i + 1}
+        row_keys = ["state", "district", "block", "subcenter", "village"]
+        if level == "villages":
+            row_keys.append("lgd")
+        if level == "households":
+            row_keys.append("household")
+        for key in row_keys:
+            item[key] = get_val(row, key, positions[key])
+        missing = [k for k in required_by_level[level] if not item.get(k)]
+        if missing:
+            errors.append(f"Row {i + 1}: missing {', '.join(missing)}")
+            continue
+        items.append(item)
+
+    return items, errors
+
+
+def normalize_question_payload(data: dict):
+    """
+    Accept multiple payload styles from different UIs:
+    - admin UI might send: {section_id, question_text, answer_type, options, parent_id, trigger_value, question_type}
+    - old UI might send: {section_id, text, type}
+    """
+
+    section_id = safe_int(data.get("section_id"))
+    question_text_value = (data.get("question_text") or data.get("text") or "").strip()
+
+    # "answer_type" from frontend might be: number/text/numerical/open_ended/mcq/checkbox
+    incoming_type = (data.get("answer_type") or data.get("type") or data.get("question_type") or "").strip()
+
+    # question_type is REQUIRED by DB (example: single_choice, multiple_choice, open_ended)
+    # If frontend doesn't send question_type explicitly, we infer.
+    # You can adjust mapping according to your UI.
+    mapping = {
+        "text":            {"question_type": "open_ended",     "answer_type": "text"},
+        "open_ended":      {"question_type": "open_ended",     "answer_type": "text"},
+        "number":          {"question_type": "open_ended",     "answer_type": "numerical"},
+        "numerical":       {"question_type": "open_ended",     "answer_type": "numerical"},
+        "mcq":             {"question_type": "single_choice",  "answer_type": "numerical"},
+        "single_choice":   {"question_type": "single_choice",  "answer_type": "numerical"},
+        "checkbox":        {"question_type": "multiple_choice","answer_type": "numerical"},
+        "multiple_choice": {"question_type": "multiple_choice","answer_type": "numerical"},
+    }
+
+    inferred = mapping.get(incoming_type, {"question_type": "open_ended", "answer_type": "text"})
+
+    question_type = (data.get("question_type") or "").strip() or inferred["question_type"]
+    answer_type = inferred["answer_type"]
+
+    # Options can be list, JSON string, CSV string, or None
+    options = data.get("options", None)
+    if isinstance(options, list):
+        options = json.dumps(options)
+    elif isinstance(options, dict):
+        options = json.dumps(options)
+    elif isinstance(options, str):
+        options = options.strip()
+        if options == "":
+            options = None
+        else:
+            try:
+                parsed = json.loads(options)
+                if isinstance(parsed, (list, dict)):
+                    options = json.dumps(parsed)
+                else:
+                    options = json.dumps([str(parsed)])
+            except Exception:
+                options = json.dumps([o.strip() for o in options.split(",") if o.strip()])
+
+    parent_id = data.get("parent_id", None)
+    parent_id = safe_int(parent_id, None)
+    if parent_id == 0:
+        parent_id = None
+
+    trigger_value = data.get("trigger_value", None)
+    if isinstance(trigger_value, str):
+        trigger_value = trigger_value.strip()
+        if trigger_value == "":
+            trigger_value = None
+
+    # Only choice questions should keep options
+    if question_type == "open_ended":
+        options = None
+
+    is_mandatory = safe_int(data.get("is_mandatory"), 0)
+    if is_mandatory not in (0, 1):
+        is_mandatory = 0
+
+    return {
+        "section_id": section_id,
+        "question_text": question_text_value,
+        "question_type": question_type,
+        "answer_type": answer_type,
+        "options": options,
+        "parent_id": parent_id,
+        "trigger_value": trigger_value,
+        "is_mandatory": is_mandatory,
+    }
+
+def normalize_trigger_values(raw_trigger, fallback_value=None):
+    """
+    Normalize trigger input into a de-duplicated list of strings.
+    Accepts: string, list, number, or None.
+    """
+    candidates = []
+
+    if isinstance(raw_trigger, list):
+        candidates = raw_trigger
+    elif raw_trigger is None:
+        if isinstance(fallback_value, list):
+            candidates = fallback_value
+        elif fallback_value is not None:
+            candidates = [fallback_value]
+    else:
+        candidates = [raw_trigger]
+
+    values = []
+    for item in candidates:
+        if item is None:
+            continue
+        val = str(item).strip()
+        if val:
+            values.append(val)
+
+    # De-duplicate while preserving order
+    seen = set()
+    normalized = []
+    for val in values:
+        if val in seen:
+            continue
+        seen.add(val)
+        normalized.append(val)
+
+    return normalized
+
+def format_question_text_with_trigger(question_text, trigger_value):
+    if question_text is None:
+        return question_text
+    text = str(question_text).strip()
+    if not text or not trigger_value:
+        return text
+    prefix = f"{trigger_value} - "
+    if text.startswith(prefix):
+        return text
+    if " - " in text:
+        text = text.split(" - ", 1)[1].strip()
+    return f"{prefix}{text}"
+
+def build_question_tree(questions):
+    """
+    Build a nested question tree from a flat list of question dicts.
+    Expects keys: question_id, parent_id, question_order.
+    """
+    by_parent = {}
+    for q in questions:
+        parent_id = q.get("parent_id")
+        if parent_id in (0, "0"):
+            parent_id = None
+            q["parent_id"] = None
+        by_parent.setdefault(parent_id, []).append(q)
+
+    for parent_id, items in by_parent.items():
+        items.sort(key=lambda r: r.get("question_order") or 0)
+
+    def build(parent_id=None):
+        nodes = []
+        for q in by_parent.get(parent_id, []):
+            node = dict(q)
+            node["children"] = build(q["question_id"])
+            nodes.append(node)
+        return nodes
+
+    return build(None)
+
+
+# ==========================================================
+# PAGES
+# ==========================================================
+
+@app.route("/")
+def home():
+    return render_template("home.html")
+
+
+@app.route("/user-login", methods=["GET", "POST"])
+def user_login():
+    if request.method == "POST":
+        try:
+            result = db.session.execute(
+                sql_text("SELECT user_id, password_hash FROM users WHERE username=:u"),
+                {"u": request.form["username"]},
+            ).mappings().fetchone()
+
+            if result and check_password_hash(result["password_hash"], request.form["password"]):
+                session.clear()
+                session["user_id"] = result["user_id"]
+                session["role"] = "user"
+                session["username"] = request.form["username"]
+                return redirect(url_for("user_dashboard"))
+
+            return render_template("user_login.html", error="Invalid username or password")
+        except Exception as e:
+            return render_template("user_login.html", error=f"Login error: {str(e)}")
+
+    return render_template("user_login.html")
+
+
+@app.route("/admin-login", methods=["GET", "POST"])
+def admin_login():
+    if request.method == "POST":
+        try:
+            result = db.session.execute(
+                sql_text("SELECT admin_id, password_hash FROM admins WHERE username=:u"),
+                {"u": request.form["username"]},
+            ).mappings().fetchone()
+
+            if result and check_password_hash(result["password_hash"], request.form["password"]):
+                session.clear()
+                session["admin_id"] = result["admin_id"]
+                session["role"] = "admin"
+                session["username"] = request.form["username"]
+                return redirect(url_for("admin_dashboard"))
+
+            return render_template("admin_login.html", error="Invalid username or password")
+        except Exception as e:
+            return render_template("admin_login.html", error=f"Login error: {str(e)}")
+
+    return render_template("admin_login.html")
+
+
+@app.route("/logout")
+def logout():
+    session.clear()
+    return redirect(url_for("home"))
+
+
+@app.route("/user-dashboard")
+@role_required("user")
+def user_dashboard():
+    return render_template("user_dashboard.html")
+
+
+@app.route("/admin-dashboard")
+@role_required("admin")
+def admin_dashboard():
+    return render_template("admin_dashboard.html")
+
+
+@app.route("/location-map")
+@role_required("admin")
+def location_map():
+    """Display map of household survey locations"""
+    return render_template("location_map.html")
+
+
+@app.route("/mark-location")
+@role_required("user")
+def mark_location():
+    """User marks exact household location on map"""
+    if "household_id" not in session:
+        return redirect(url_for("user_dashboard"))
+    return render_template("mark_location.html")
+
+
+@app.route("/questionnaire")
+@role_required("user")
+def questionnaire():
+    if "household_id" not in session:
+        return redirect(url_for("user_dashboard"))
+    return render_template("questionnaire.html")
+
+
+@app.route("/survey")
+@role_required("user")
+def survey():
+    if "household_id" not in session:
+        return redirect(url_for("user_dashboard"))
+    return render_template("survey.html")
+
+
+# ==========================================================
+# USER APIs
+# ==========================================================
+
+@app.route("/api/current-user")
+def get_current_user():
+    return jsonify({"username": session.get("username", "User")})
+
+@app.route("/api/current-household")
+def get_current_household():
+    return jsonify({
+        "household_id": session.get("household_id"),
+        "main_questionnaire_id": session.get("main_questionnaire_id")
+    })
+
+
+@app.route("/api/save-household-location", methods=["POST"])
+@role_required("user")
+def save_household_location():
+    """Save GPS coordinates for household marked by user"""
+    if "household_id" not in session:
+        return json_error("No household selected", 401)
+    
+    try:
+        data = json_body()
+        household_id = session["household_id"]
+        latitude = data.get("latitude")
+        longitude = data.get("longitude")
+        location_accuracy = data.get("location_accuracy")
+        
+        if latitude is None or longitude is None:
+            return json_error("Latitude and longitude are required", 400)
+        
+        # Update household location
+        db.session.execute(sql_text("""
+            UPDATE households 
+            SET latitude = :lat, 
+                longitude = :lng,
+                location_accuracy = :acc,
+                location_updated_at = GETDATE()
+            WHERE household_id = :hid
+        """), {
+            "lat": latitude,
+            "lng": longitude,
+            "acc": location_accuracy,
+            "hid": household_id
+        })
+        
+        db.session.commit()
+        
+        return jsonify({
+            "success": True,
+            "message": "Location saved successfully"
+        })
+    
+    except Exception as e:
+        db.session.rollback()
+        return json_error(str(e), 500)
+
+
+@app.route("/api/household-draft")
+def get_household_draft():
+    if session.get("role") != "user" or "household_id" not in session:
+        return json_error("Unauthorized", 401)
+
+    try:
+        household_id = session.get("household_id")
+        main_row = db.session.execute(sql_text("""
+            SELECT TOP 1 main_questionnaire_id, responses
+            FROM main_questionnaire_responses
+            WHERE household_id = :hid
+            ORDER BY main_questionnaire_id DESC
+        """), {"hid": household_id}).mappings().fetchone()
+
+        main_id = main_row["main_questionnaire_id"] if main_row else None
+        status = _extract_status(safe_json_load(main_row["responses"])) if main_row else None
+
+        draft_row = db.session.execute(sql_text("""
+            SELECT TOP 1 response_data
+            FROM household_response_drafts
+            WHERE household_id = :hid
+            ORDER BY updated_at DESC
+        """), {"hid": household_id}).mappings().fetchone()
+        draft_payload = safe_json_load(draft_row["response_data"]) if draft_row else {}
+        combined = _combine_draft_sections(draft_payload)
+
+        return jsonify({
+            "success": True,
+            "household_id": household_id,
+            "main_questionnaire_id": main_id,
+            "status": status,
+            "draft": draft_payload,
+            "responses": combined
+        })
+    except Exception as e:
+        return json_error(str(e), 500)
+
+
+@app.route("/api/survey-draft", methods=["POST"])
+def save_survey_draft():
+    if session.get("role") != "user" or "household_id" not in session:
+        return json_error("Unauthorized", 401)
+
+    try:
+        data = json_body()
+        survey_state = data.get("survey_state")
+        if not isinstance(survey_state, dict):
+            return jsonify({"success": True})
+
+        household_id = session.get("household_id")
+        user_id = session.get("user_id")
+        row = db.session.execute(sql_text("""
+            SELECT TOP 1 draft_id, response_data
+            FROM household_response_drafts
+            WHERE household_id = :hid
+            ORDER BY updated_at DESC
+        """), {"hid": household_id}).mappings().fetchone()
+
+        existing = safe_json_load(row["response_data"]) if row else {}
+        if not isinstance(existing, dict):
+            existing = {}
+        existing["survey_state"] = survey_state
+        existing["updated_at"] = datetime.now().isoformat()
+
+        if row and row.get("draft_id"):
+            _log_draft_history(
+                row.get("draft_id"),
+                household_id,
+                row.get("response_data"),
+                action="save_survey_draft",
+                user_id=user_id,
+                username=session.get("username"),
+            )
+            db.session.execute(sql_text("""
+                UPDATE household_response_drafts
+                SET response_data = :data
+                WHERE draft_id = :did
+            """), {"did": row["draft_id"], "data": json.dumps(existing)})
+        else:
+            db.session.execute(sql_text("""
+                INSERT INTO household_response_drafts (household_id, user_id, response_data)
+                VALUES (:hid, :uid, :data)
+            """), {"hid": household_id, "uid": user_id, "data": json.dumps(existing)})
+
+        main_id = safe_int(session.get("main_questionnaire_id"))
+        if main_id:
+            _ensure_survey_contributor(main_id, user_id)
+
+        db.session.commit()
+        return jsonify({"success": True})
+    except Exception as e:
+        db.session.rollback()
+        return json_error(str(e), 500)
+
+
+@app.route("/api/states")
+def get_states():
+    try:
+        rows = db.session.execute(sql_text("SELECT * FROM states ORDER BY name")).mappings().all()
+        return jsonify([dict(r) for r in rows])
+    except Exception as e:
+        return json_error(str(e), 500)
+
+
+@app.route("/api/districts/<int:state_id>")
+def get_districts(state_id):
+    try:
+        rows = db.session.execute(
+            sql_text("SELECT * FROM districts WHERE state_id=:sid ORDER BY name"),
+            {"sid": state_id},
+        ).mappings().all()
+        return jsonify([dict(r) for r in rows])
+    except Exception as e:
+        return json_error(str(e), 500)
+
+
+@app.route("/api/blocks/<int:district_id>")
+def get_blocks(district_id):
+    try:
+        rows = db.session.execute(
+            sql_text("SELECT * FROM blocks WHERE district_id=:did ORDER BY name"),
+            {"did": district_id},
+        ).mappings().all()
+        return jsonify([dict(r) for r in rows])
+    except Exception as e:
+        return json_error(str(e), 500)
+
+
+@app.route("/api/sub-centers/<int:block_id>")
+def get_sub_centers(block_id):
+    try:
+        rows = db.session.execute(
+            sql_text("SELECT * FROM sub_centers WHERE block_id=:bid ORDER BY name"),
+            {"bid": block_id},
+        ).mappings().all()
+        return jsonify([dict(r) for r in rows])
+    except Exception as e:
+        return json_error(str(e), 500)
+
+
+@app.route("/api/villages/by-subcenter/<int:sub_center_id>")
+def get_villages_by_subcenter(sub_center_id):
+    try:
+        rows = db.session.execute(
+            sql_text("SELECT village_id, name FROM villages WHERE sub_center_id=:sid ORDER BY name"),
+            {"sid": sub_center_id},
+        ).mappings().all()
+        return jsonify([dict(r) for r in rows])
+    except Exception as e:
+        return json_error(str(e), 500)
+
+
+@app.route("/api/household-registry")
+def get_household_registry():
+    try:
+        village_id = safe_int(request.args.get("village_id"))
+        q = (request.args.get("q") or "").strip()
+
+        if not village_id:
+            return json_error("village_id is required", 400)
+        if not table_exists("household_registry"):
+            return jsonify([])
+
+        params = {"vid": village_id}
+        query = """
+            SELECT TOP 50 registry_id, household_code
+            FROM household_registry
+            WHERE village_id = :vid
+        """
+        if q:
+            query += " AND household_code LIKE :q"
+            params["q"] = f"%{q}%"
+        query += " ORDER BY household_code"
+
+        rows = db.session.execute(sql_text(query), params).mappings().all()
+        return jsonify([
+            {"registry_id": r["registry_id"], "household_code": r["household_code"]}
+            for r in rows
+        ])
+    except Exception as e:
+        return json_error(str(e), 500)
+
+
+@app.route("/api/household", methods=["POST"])
+def household():
+    if session.get("role") != "user":
+        return json_error("Unauthorized", 401)
+
+    try:
+        data = json_body()
+        reopen_completed = to_bool_flag(data.get("reopen_completed"), default=0) == 1
+        admin_username = (data.get("admin_username") or "").strip()
+        admin_password = data.get("admin_password") or ""
+
+        required = ["household_name", "state_id", "district_id", "block_id", "sub_center_id", "village_id"]
+        for k in required:
+            if data.get(k) in (None, ""):
+                return json_error(f"{k.replace('_', ' ').title()} is required", 400)
+
+        household_name = (data.get("household_name") or "").strip()
+        if not household_name:
+            return json_error("Household name is required", 400)
+
+        existing = db.session.execute(
+            sql_text("SELECT TOP 1 household_id FROM households WHERE LOWER(name) = LOWER(:name)"),
+            {"name": household_name}
+        ).mappings().fetchone()
+        if existing:
+            household_id = existing["household_id"]
+            main_row = db.session.execute(sql_text("""
+                SELECT TOP 1 main_questionnaire_id, user_id, responses
+                FROM main_questionnaire_responses
+                WHERE household_id = :hid
+                ORDER BY main_questionnaire_id DESC
+            """), {"hid": household_id}).mappings().fetchone()
+
+            if main_row:
+                resp_payload = safe_json_load(main_row.get("responses")) if main_row.get("responses") is not None else {}
+                if _is_completed_main_status(_extract_status(resp_payload)):
+                    if not reopen_completed:
+                        return json_error("Survey already completed for this household. Enable reopen to edit it.", 409)
+                    if not _verify_admin_credentials(admin_username, admin_password):
+                        return json_error("Valid admin credentials are required to re-open a completed survey.", 403)
+                    _reopen_main_submission(
+                        main_row["main_questionnaire_id"],
+                        resp_payload,
+                        session.get("user_id"),
+                        session.get("username")
+                    )
+                    session["force_reopen_main"] = True
+                main_id = main_row["main_questionnaire_id"]
+            else:
+                draft_payload = json.dumps({
+                    "responses": {},
+                    "submitted_at": None,
+                    "household_id": household_id,
+                    "submitted_by_user_id": session.get("user_id"),
+                    "submitted_by_username": session.get("username"),
+                    "status": "draft"
+                })
+                main_res = db.session.execute(sql_text("""
+                    INSERT INTO main_questionnaire_responses (household_id, user_id, responses)
+                    VALUES (:hid, :uid, :resp)
+                """), {"hid": household_id, "uid": session.get("user_id"), "resp": draft_payload})
+                main_id = get_last_inserted_id()
+
+            session["household_id"] = household_id
+            session["main_questionnaire_id"] = main_id
+            _ensure_survey_contributor(main_id, session.get("user_id"))
+
+            draft_row = db.session.execute(sql_text("""
+                SELECT TOP 1 response_data
+                FROM household_response_drafts
+                WHERE household_id = :hid
+                ORDER BY updated_at DESC
+            """), {"hid": household_id}).mappings().fetchone()
+            draft_payload = safe_json_load(draft_row["response_data"]) if draft_row else {}
+            combined = _combine_draft_sections(draft_payload)
+
+            # Get location data
+            location_row = db.session.execute(sql_text("""
+                SELECT latitude, longitude, location_accuracy, location_updated_at
+                FROM households
+                WHERE household_id = :hid
+            """), {"hid": household_id}).mappings().fetchone()
+            
+            has_location = location_row and location_row["latitude"] is not None and location_row["longitude"] is not None
+            
+            db.session.commit()
+            return jsonify({
+                "success": True,
+                "household_id": household_id,
+                "main_questionnaire_id": main_id,
+                "resumed": True,
+                "reopened": bool(reopen_completed and main_row and _is_completed_main_status(_extract_status(resp_payload))),
+                "draft": draft_payload,
+                "responses": combined,
+                "has_location": has_location,
+                "location": {
+                    "latitude": float(location_row["latitude"]) if location_row and location_row["latitude"] else None,
+                    "longitude": float(location_row["longitude"]) if location_row and location_row["longitude"] else None,
+                    "accuracy": float(location_row["location_accuracy"]) if location_row and location_row["location_accuracy"] else None,
+                    "updated_at": location_row["location_updated_at"].isoformat() if location_row and location_row["location_updated_at"] else None
+                } if has_location else None
+            })
+
+        village_id = int(data["village_id"])
+        state_id = int(data["state_id"])
+        district_id = int(data["district_id"])
+        block_id = int(data["block_id"])
+        sub_center_id = int(data["sub_center_id"])
+
+        v = db.session.execute(sql_text("""
+            SELECT village_id, district_id, block_id, sub_center_id
+            FROM villages
+            WHERE village_id = :vid
+        """), {"vid": village_id}).mappings().fetchone()
+
+        if not v:
+            return json_error(f"Village with ID {village_id} does not exist. Contact admin.", 400)
+
+        if int(v["district_id"]) != district_id:
+            return json_error("Village does not belong to selected District", 400)
+        if v["block_id"] is not None and int(v["block_id"]) != block_id:
+            return json_error("Village does not belong to selected Block", 400)
+        if v["sub_center_id"] is not None and int(v["sub_center_id"]) != sub_center_id:
+            return json_error("Village does not belong to selected Sub-Center", 400)
+
+        if table_exists("household_registry"):
+            has_registry = db.session.execute(sql_text("""
+                SELECT TOP 1 1
+                FROM household_registry
+                WHERE village_id = :vid
+            """), {"vid": village_id}).mappings().fetchone()
+            if has_registry:
+                registry_id = safe_int(data.get("household_registry_id"))
+                if registry_id:
+                    reg = db.session.execute(sql_text("""
+                        SELECT TOP 1 registry_id, household_code
+                        FROM household_registry
+                        WHERE registry_id = :rid AND village_id = :vid
+                    """), {"rid": registry_id, "vid": village_id}).mappings().fetchone()
+                    if not reg or (reg.get("household_code") or "").strip().lower() != household_name.lower():
+                        return json_error("Household ID does not match registry selection.", 400)
+                else:
+                    reg = db.session.execute(sql_text("""
+                        SELECT TOP 1 registry_id
+                        FROM household_registry
+                        WHERE code_ci = LOWER(:code) AND village_id = :vid
+                    """), {"code": household_name, "vid": village_id}).mappings().fetchone()
+                    if not reg:
+                        return json_error("Household ID not found for selected village. Please select from the dropdown.", 400)
+
+        insert_res = db.session.execute(sql_text("""
+            INSERT INTO households (name, state_id, district_id, block_id, sub_center_id, village_id, user_id)
+            VALUES (:name, :state_id, :district_id, :block_id, :sub_center_id, :village_id, :user_id)
+        """), {
+            "name": household_name,
+            "state_id": state_id,
+            "district_id": district_id,
+            "block_id": block_id,
+            "sub_center_id": sub_center_id,
+            "village_id": village_id,
+            "user_id": session["user_id"],
+        })
+        household_id = get_last_inserted_id()
+        db.session.commit()
+        session["household_id"] = household_id
+
+        # Create a draft main questionnaire record immediately for this household
+        draft_payload = json.dumps({
+            "responses": {},
+            "submitted_at": None,
+            "household_id": household_id,
+            "submitted_by_user_id": session.get("user_id"),
+            "submitted_by_username": session.get("username"),
+            "status": "draft"
+        })
+        main_res = db.session.execute(sql_text("""
+            INSERT INTO main_questionnaire_responses (household_id, user_id, responses)
+            VALUES (:hid, :uid, :resp)
+        """), {"hid": household_id, "uid": session.get("user_id"), "resp": draft_payload})
+        main_id = get_last_inserted_id()
+        _ensure_survey_contributor(main_id, session.get("user_id"))
+        db.session.commit()
+        session["main_questionnaire_id"] = main_id
+
+        return jsonify({
+            "success": True, 
+            "household_id": household_id, 
+            "main_questionnaire_id": main_id, 
+            "resumed": False,
+            "has_location": False,
+            "location": None
+        })
+
+    except Exception as e:
+        db.session.rollback()
+        return json_error(str(e), 500)
+
+
+@app.route("/api/resume-household", methods=["POST"])
+def resume_household():
+    if session.get("role") != "user":
+        return json_error("Unauthorized", 401)
+
+    try:
+        data = json_body()
+        household_name = (data.get("household_name") or "").strip()
+        reopen_completed = to_bool_flag(data.get("reopen_completed"), default=0) == 1
+        admin_username = (data.get("admin_username") or "").strip()
+        admin_password = data.get("admin_password") or ""
+        if not household_name:
+            return json_error("household_name is required", 400)
+
+        existing = db.session.execute(
+            sql_text("SELECT TOP 1 household_id FROM households WHERE LOWER(name) = LOWER(:name)"),
+            {"name": household_name}
+        ).mappings().fetchone()
+        if not existing:
+            return json_error("Household not found", 404)
+
+        household_id = existing["household_id"]
+        main_row = db.session.execute(sql_text("""
+            SELECT TOP 1 main_questionnaire_id, user_id, responses
+            FROM main_questionnaire_responses
+            WHERE household_id = :hid
+            ORDER BY main_questionnaire_id DESC
+        """), {"hid": household_id}).mappings().fetchone()
+
+        if main_row:
+            resp_payload = safe_json_load(main_row.get("responses")) if main_row.get("responses") is not None else {}
+            if _is_completed_main_status(_extract_status(resp_payload)):
+                if not reopen_completed:
+                    return json_error("Survey already completed for this household. Enable reopen to edit it.", 409)
+                if not _verify_admin_credentials(admin_username, admin_password):
+                    return json_error("Valid admin credentials are required to re-open a completed survey.", 403)
+                _reopen_main_submission(
+                    main_row["main_questionnaire_id"],
+                    resp_payload,
+                    session.get("user_id"),
+                    session.get("username")
+                )
+                session["force_reopen_main"] = True
+            main_id = main_row["main_questionnaire_id"]
+        else:
+            draft_payload = json.dumps({
+                "responses": {},
+                "submitted_at": None,
+                "household_id": household_id,
+                "submitted_by_user_id": session.get("user_id"),
+                "submitted_by_username": session.get("username"),
+                "status": "draft"
+            })
+            main_res = db.session.execute(sql_text("""
+                INSERT INTO main_questionnaire_responses (household_id, user_id, responses)
+                VALUES (:hid, :uid, :resp)
+            """), {"hid": household_id, "uid": session.get("user_id"), "resp": draft_payload})
+            main_id = get_last_inserted_id()
+
+        session["household_id"] = household_id
+        session["main_questionnaire_id"] = main_id
+        _ensure_survey_contributor(main_id, session.get("user_id"))
+
+        draft_row = db.session.execute(sql_text("""
+            SELECT TOP 1 response_data
+            FROM household_response_drafts
+            WHERE household_id = :hid
+            ORDER BY updated_at DESC
+        """), {"hid": household_id}).mappings().fetchone()
+        draft_payload = safe_json_load(draft_row["response_data"]) if draft_row else {}
+        combined = _combine_draft_sections(draft_payload)
+
+        db.session.commit()
+        return jsonify({
+            "success": True,
+            "household_id": household_id,
+            "main_questionnaire_id": main_id,
+            "resumed": True,
+            "reopened": bool(reopen_completed and main_row and _is_completed_main_status(_extract_status(resp_payload))),
+            "draft": draft_payload,
+            "responses": combined
+        })
+    except Exception as e:
+        db.session.rollback()
+        return json_error(str(e), 500)
+
+
+@app.route("/api/questionnaire-data")
+def get_questionnaire_data():
+    try:
+        try:
+            sections = db.session.execute(
+                sql_text("""
+                    SELECT *
+                    FROM questionnaire_sections
+                    WHERE COALESCE(show_on_user_end, 1) = 1
+                    ORDER BY section_order
+                """)
+            ).mappings().all()
+        except Exception:
+            sections = db.session.execute(
+                sql_text("SELECT * FROM questionnaire_sections ORDER BY section_order")
+            ).mappings().all()
+
+        result = []
+        for section in sections:
+            question_rows = db.session.execute(
+                sql_text("SELECT * FROM questions WHERE question_section_id=:sid ORDER BY question_order"),
+                {"sid": section["section_id"]},
+            ).mappings().all()
+            questions = build_question_tree([dict(q) for q in question_rows])
+
+            result.append({
+                "section_id": section["section_id"],
+                "section_title": section["section_title"],
+                "section_order": section["section_order"],
+                "questions": questions,
+            })
+
+        return jsonify(result)
+    except Exception as e:
+        return json_error(str(e), 500)
+
+
+@app.route("/api/questionnaire/data")
+def get_questionnaire_data_legacy():
+    return get_questionnaire_data()
+
+@app.route("/api/individual-questionnaire-data")
+def get_individual_questionnaire_data():
+    try:
+        try:
+            sections = db.session.execute(
+                sql_text("""
+                    SELECT *
+                    FROM individual_questionnaire_sections
+                    WHERE COALESCE(show_on_user_end, 1) = 1
+                    ORDER BY section_order
+                """)
+            ).mappings().all()
+        except Exception:
+            sections = db.session.execute(
+                sql_text("SELECT * FROM individual_questionnaire_sections ORDER BY section_order")
+            ).mappings().all()
+
+        result = []
+        for section in sections:
+            question_rows = db.session.execute(
+                sql_text("SELECT * FROM individual_questions WHERE question_section_id=:sid ORDER BY question_order"),
+                {"sid": section["section_id"]},
+            ).mappings().all()
+            questions = build_question_tree([dict(q) for q in question_rows])
+
+            result.append({
+                "section_id": section["section_id"],
+                "section_title": section["section_title"],
+                "section_order": section["section_order"],
+                "questions": questions,
+            })
+
+        return jsonify(result)
+    except Exception as e:
+        return json_error(str(e), 500)
+
+
+@app.route("/api/sections")
+def get_sections():
+    try:
+        rows = db.session.execute(sql_text("""
+            SELECT * FROM questionnaire_sections
+            ORDER BY section_order
+        """)).mappings().all()
+        return jsonify([dict(r) for r in rows])
+    except Exception as e:
+        return json_error(str(e), 500)
+
+
+@app.route("/api/responses", methods=["POST"])
+def save_responses():
+    if session.get("role") != "user" or "household_id" not in session:
+        return json_error("Unauthorized", 401)
+
+    try:
+        data = json_body()
+        household_id = session["household_id"]
+        user_id = session.get("user_id")
+
+        if not data:
+            return jsonify({"success": True, "message": "No responses to save"})
+
+        section_id = data.get("section_id")
+        if section_id is None:
+            return json_error("section_id is required", 400)
+        responses = data.get("responses", {})
+        is_skipped = bool(data.get("is_skipped"))
+        if not isinstance(responses, dict):
+            responses = {}
+        if not responses and not is_skipped:
+            return jsonify({"success": True, "message": "No responses to save"})
+        timestamp = data.get("timestamp", datetime.now().isoformat())
+        
+        # 🌍 Get location data if provided
+        latitude = data.get("latitude")
+        longitude = data.get("longitude")
+        location_accuracy = data.get("location_accuracy")
+
+        household = db.session.execute(
+            sql_text("SELECT household_id FROM households WHERE household_id=:hid"),
+            {"hid": household_id}
+        ).mappings().fetchone()
+
+        if not household:
+            return json_error("Household not found", 404)
+        
+        # 🌍 Update household location if coordinates provided
+        if latitude is not None and longitude is not None:
+            db.session.execute(sql_text("""
+                UPDATE households 
+                SET latitude = :lat, 
+                    longitude = :lng,
+                    location_accuracy = :acc,
+                    location_updated_at = GETDATE()
+                WHERE household_id = :hid
+            """), {
+                "lat": latitude,
+                "lng": longitude,
+                "acc": location_accuracy,
+                "hid": household_id
+            })
+
+        row = db.session.execute(sql_text("""
+            SELECT TOP 1 draft_id, user_id, response_data
+            FROM household_response_drafts
+            WHERE household_id = :hid
+            ORDER BY updated_at DESC
+        """), {"hid": household_id}).mappings().fetchone()
+
+        existing = {}
+        if row and row.get("response_data"):
+            try:
+                existing = json.loads(row["response_data"]) if isinstance(row["response_data"], str) else row["response_data"]
+            except Exception:
+                existing = {}
+
+        sections = existing.get("sections", {})
+        survey_state = existing.get("survey_state")
+        sections[str(section_id)] = {
+            "responses": responses,
+            "is_skipped": is_skipped,
+            "timestamp": timestamp
+        }
+
+        payload = {
+            "sections": sections,
+            "last_saved_section_id": section_id,
+            "saved_by_user_id": user_id,
+            "saved_by_username": session.get("username"),
+            "updated_at": timestamp
+        }
+        if survey_state is not None:
+            payload["survey_state"] = survey_state
+
+        if row and row.get("draft_id"):
+            _log_draft_history(
+                row.get("draft_id"),
+                household_id,
+                row.get("response_data"),
+                action="save_responses",
+                user_id=user_id,
+                username=session.get("username"),
+            )
+            db.session.execute(sql_text("""
+                UPDATE household_response_drafts
+                SET response_data = :data
+                WHERE draft_id = :did
+            """), {
+                "did": row["draft_id"],
+                "data": json.dumps(payload)
+            })
+        else:
+            db.session.execute(sql_text("""
+                INSERT INTO household_response_drafts (household_id, user_id, response_data)
+                VALUES (:hid, :uid, :data)
+            """), {
+                "hid": household_id,
+                "uid": user_id,
+                "data": json.dumps(payload)
+            })
+
+        main_id = safe_int(session.get("main_questionnaire_id"))
+        if not main_id:
+            main_row = db.session.execute(sql_text("""
+                SELECT TOP 1 main_questionnaire_id
+                FROM main_questionnaire_responses
+                WHERE household_id = :hid
+                ORDER BY main_questionnaire_id DESC
+            """), {"hid": household_id}).mappings().fetchone()
+            if main_row:
+                main_id = main_row["main_questionnaire_id"]
+            else:
+                draft_payload = json.dumps({
+                    "responses": {},
+                    "submitted_at": None,
+                    "household_id": household_id,
+                    "submitted_by_user_id": user_id,
+                    "submitted_by_username": session.get("username"),
+                    "status": "draft"
+                })
+                main_res = db.session.execute(sql_text("""
+                    INSERT INTO main_questionnaire_responses (household_id, user_id, responses)
+                    VALUES (:hid, :uid, :resp)
+                """), {"hid": household_id, "uid": user_id, "resp": draft_payload})
+                main_id = get_last_inserted_id()
+            session["main_questionnaire_id"] = main_id
+
+        _ensure_survey_contributor(main_id, user_id)
+
+        db.session.commit()
+        return jsonify({"success": True, "message": f"Section {section_id} responses saved", "saved_count": len(responses)})
+
+    except Exception as e:
+        db.session.rollback()
+        return json_error(str(e), 500)
+
+
+@app.route("/api/save_responses", methods=["POST"])
+def save_responses_legacy():
+    return save_responses()
+
+@app.route("/api/main-questionnaire/submit", methods=["POST"])
+def submit_main_questionnaire():
+    if session.get("role") != "user" or "household_id" not in session:
+        return json_error("Unauthorized", 401)
+
+    try:
+        data = json_body()
+        responses = data.get("responses", None)
+        draft_payload = {}
+
+        household_id = safe_int(session.get("household_id"))
+        user_id = session.get("user_id")
+        if not household_id:
+            return json_error("Household not set. Please create/select a household before submitting.", 400)
+
+        household = db.session.execute(
+            sql_text("SELECT household_id FROM households WHERE household_id=:hid"),
+            {"hid": household_id}
+        ).mappings().fetchone()
+        if not household:
+            return json_error("Household not found. Please create/select a household before submitting.", 400)
+
+        draft_row = db.session.execute(sql_text("""
+            SELECT TOP 1 response_data
+            FROM household_response_drafts
+            WHERE household_id = :hid
+            ORDER BY updated_at DESC
+        """), {"hid": household_id}).mappings().fetchone()
+        draft_payload = safe_json_load(draft_row["response_data"]) if draft_row else {}
+
+        latest_main_row = db.session.execute(sql_text("""
+            SELECT TOP 1 responses
+            FROM main_questionnaire_responses
+            WHERE household_id = :hid
+            ORDER BY main_questionnaire_id DESC
+        """), {"hid": household_id}).mappings().fetchone()
+        latest_main_payload = safe_json_load(latest_main_row["responses"]) if latest_main_row else {}
+        latest_main_answers = (latest_main_payload or {}).get("responses", {}) if isinstance(latest_main_payload, dict) else {}
+
+        merged_answers = {}
+        if isinstance(latest_main_answers, dict):
+            merged_answers.update(latest_main_answers)
+        merged_answers.update(_combine_draft_sections(draft_payload))
+        if isinstance(responses, dict):
+            merged_answers.update(responses)
+
+        all_section_ids = _main_section_ids()
+        completion = _section_completion_from_draft(draft_payload, all_section_ids)
+        answered_section_ids, answered_details = _answered_section_ids_from_responses(
+            all_section_ids,
+            merged_answers,
+            include_details=True,
+        )
+
+        completed_ids = set(completion["completed_ids"]) | answered_section_ids
+        skipped_ids = set(completion["skipped_ids"])
+        effective_skipped_ids = skipped_ids - answered_section_ids
+        completed_ids -= effective_skipped_ids
+        pending_ids = sorted(set(all_section_ids) - completed_ids)
+
+        if pending_ids:
+            pending_details = {
+                str(sid): answered_details.get(sid, {
+                    "applicable_mandatory_question_ids": [],
+                    "missing_mandatory_question_ids": [],
+                })
+                for sid in pending_ids
+            }
+            return jsonify({
+                "success": False,
+                "error": "Please complete all sections before final submit.",
+                "pending_section_ids": pending_ids,
+                "pending_section_details": pending_details,
+                "skipped_section_ids": sorted(skipped_ids),
+            }), 400
+
+        if not isinstance(responses, dict) or len(responses) == 0:
+            responses = _combine_draft_sections(draft_payload)
+
+        if not isinstance(responses, dict) or len(responses) == 0:
+            return json_error("responses is required", 400)
+
+        payload = json.dumps({
+            "responses": responses,
+            "status": "household_submitted",
+            "household_submitted_at": datetime.now().isoformat(),
+            "household_id": household_id,
+            "submitted_by_user_id": user_id,
+            "submitted_by_username": session.get("username")
+        })
+
+        existing_id = safe_int(data.get("main_questionnaire_id")) or safe_int(session.get("main_questionnaire_id"))
+        if not existing_id:
+            existing_row = db.session.execute(sql_text("""
+                SELECT TOP 1 main_questionnaire_id, responses
+                FROM main_questionnaire_responses
+                WHERE household_id = :hid
+                ORDER BY main_questionnaire_id DESC
+            """), {"hid": household_id}).mappings().fetchone()
+            if existing_row:
+                existing_id = existing_row["main_questionnaire_id"]
+        if existing_id:
+            row = db.session.execute(sql_text("""
+                SELECT main_questionnaire_id, responses
+                FROM main_questionnaire_responses
+                WHERE main_questionnaire_id = :mid AND household_id = :hid
+            """), {"mid": existing_id, "hid": household_id}).mappings().fetchone()
+            if row:
+                _log_main_response_history(
+                    existing_id,
+                    row.get("responses"),
+                    action="submit_main_questionnaire",
+                    household_id=household_id,
+                    user_id=user_id,
+                    username=session.get("username"),
+                )
+                db.session.execute(sql_text("""
+                    UPDATE main_questionnaire_responses
+                    SET responses = :resp
+                    WHERE main_questionnaire_id = :mid
+                """), {"resp": payload, "mid": existing_id})
+                _ensure_survey_contributor(existing_id, user_id)
+                db.session.commit()
+                session["main_questionnaire_id"] = existing_id
+                return jsonify({"success": True, "main_questionnaire_id": existing_id})
+            latest_row = db.session.execute(sql_text("""
+                SELECT TOP 1 main_questionnaire_id, responses
+                FROM main_questionnaire_responses
+                WHERE household_id = :hid
+                ORDER BY main_questionnaire_id DESC
+            """), {"hid": household_id}).mappings().fetchone()
+            if latest_row:
+                existing_id = latest_row["main_questionnaire_id"]
+                _log_main_response_history(
+                    existing_id,
+                    latest_row.get("responses"),
+                    action="submit_main_questionnaire",
+                    household_id=household_id,
+                    user_id=user_id,
+                    username=session.get("username"),
+                )
+                db.session.execute(sql_text("""
+                    UPDATE main_questionnaire_responses
+                    SET responses = :resp
+                    WHERE main_questionnaire_id = :mid
+                """), {"resp": payload, "mid": existing_id})
+                _ensure_survey_contributor(existing_id, user_id)
+                db.session.commit()
+                session["main_questionnaire_id"] = existing_id
+                return jsonify({"success": True, "main_questionnaire_id": existing_id})
+
+        insert_res = db.session.execute(sql_text("""
+            INSERT INTO main_questionnaire_responses (household_id, user_id, responses)
+            VALUES (:hid, :uid, :resp)
+        """), {"hid": household_id, "uid": user_id, "resp": payload})
+
+        new_id = get_last_inserted_id()
+        _ensure_survey_contributor(new_id, user_id)
+        db.session.commit()
+        session["main_questionnaire_id"] = new_id
+        return jsonify({"success": True, "main_questionnaire_id": new_id})
+
+    except Exception as e:
+        db.session.rollback()
+        return json_error(str(e), 500, traceback.format_exc())
+
+@app.route("/api/complete-household", methods=["POST"])
+def complete_household_survey():
+    if session.get("role") != "user" or "household_id" not in session:
+        return json_error("Unauthorized", 401)
+
+    try:
+        data = json_body()
+        household_id = safe_int(session.get("household_id"))
+        user_id = session.get("user_id")
+        if not household_id:
+            return json_error("Household not set.", 400)
+
+        main_id = safe_int(data.get("main_questionnaire_id")) or safe_int(session.get("main_questionnaire_id"))
+        if not main_id:
+            row = db.session.execute(sql_text("""
+                SELECT TOP 1 main_questionnaire_id
+                FROM main_questionnaire_responses
+                WHERE household_id = :hid
+                ORDER BY main_questionnaire_id DESC
+            """), {"hid": household_id}).mappings().fetchone()
+            if row:
+                main_id = row["main_questionnaire_id"]
+
+        if not main_id:
+            return json_error("Main questionnaire not found.", 404)
+
+        row = db.session.execute(sql_text("""
+            SELECT responses
+            FROM main_questionnaire_responses
+            WHERE main_questionnaire_id = :mid AND household_id = :hid
+        """), {"mid": main_id, "hid": household_id}).mappings().fetchone()
+        if not row:
+            return json_error("Main questionnaire not found.", 404)
+
+        payload = safe_json_load(row["responses"]) or {}
+        if not _is_completed_main_status(_extract_status(payload)):
+            _log_main_response_history(
+                main_id,
+                row.get("responses"),
+                action="complete_household_survey",
+                household_id=household_id,
+                user_id=user_id,
+                username=session.get("username"),
+            )
+            payload["status"] = "submitted"
+            payload["completed_at"] = datetime.now().isoformat()
+            db.session.execute(sql_text("""
+                UPDATE main_questionnaire_responses
+                SET responses = :resp
+                WHERE main_questionnaire_id = :mid
+            """), {"resp": json.dumps(payload), "mid": main_id})
+
+        _ensure_survey_contributor(main_id, user_id)
+        db.session.commit()
+        session["main_questionnaire_id"] = main_id
+        return jsonify({"success": True, "main_questionnaire_id": main_id})
+    except Exception as e:
+        db.session.rollback()
+        return json_error(str(e), 500)
+
+@app.route("/api/individual-questionnaire/submit", methods=["POST"])
+def submit_individual_questionnaire():
+    if session.get("role") != "user" or "household_id" not in session:
+        return json_error("Unauthorized", 401)
+
+    try:
+        data = json_body()
+        responses = data.get("responses", None)
+        main_id = safe_int(data.get("main_questionnaire_id"))
+        member_meta = data.get("member") or {}
+        aadhar = (member_meta.get("aadhar") or "").strip()
+
+        if responses is None or not main_id:
+            return json_error("main_questionnaire_id and responses are required", 400)
+        if not aadhar or not aadhar.isdigit() or len(aadhar) != 12:
+            return json_error("Valid 12-digit Aadhaar ID is required", 400)
+
+        aadhar_hash = hash_aadhar(aadhar)
+        member_meta["aadhar"] = encrypt_aadhar(aadhar)
+        member_meta["aadhar_hash"] = aadhar_hash
+
+        household_id = safe_int(session.get("household_id"))
+        user_id = session.get("user_id")
+        if not household_id:
+            return json_error("Household not set. Please create/select a household before submitting.", 400)
+
+        main_row = db.session.execute(sql_text("""
+            SELECT main_questionnaire_id
+            FROM main_questionnaire_responses
+            WHERE main_questionnaire_id = :mid AND household_id = :hid
+        """), {"mid": main_id, "hid": household_id}).mappings().fetchone()
+
+        if not main_row:
+            fallback = db.session.execute(sql_text("""
+                SELECT TOP 1 main_questionnaire_id
+                FROM main_questionnaire_responses
+                WHERE household_id = :hid
+                ORDER BY main_questionnaire_id DESC
+            """), {"hid": household_id}).mappings().fetchone()
+            if fallback:
+                main_id = fallback["main_questionnaire_id"]
+            else:
+                # Create a minimal draft main questionnaire so individual responses can be linked
+                draft_payload = json.dumps({
+                    "responses": {},
+                    "submitted_at": None,
+                    "household_id": household_id,
+                    "submitted_by_user_id": user_id,
+                    "submitted_by_username": session.get("username"),
+                    "status": "draft"
+                })
+                insert_main = db.session.execute(sql_text("""
+                    INSERT INTO main_questionnaire_responses (household_id, user_id, responses)
+                    VALUES (:hid, :uid, :resp)
+                """), {"hid": household_id, "uid": user_id, "resp": draft_payload})
+                db.session.commit()
+                main_id = get_last_inserted_id()
+            session["main_questionnaire_id"] = main_id
+
+        payload = json.dumps({
+            "member": member_meta,
+            "responses": responses,
+            "submitted_at": datetime.now().isoformat(),
+            "household_id": household_id,
+            "submitted_by_user_id": user_id,
+            "submitted_by_username": session.get("username")
+        })
+
+        insert_ind = db.session.execute(sql_text("""
+            INSERT INTO individual_questionnaire_responses (responses, aadhar_hash)
+            VALUES (:resp, :ah)
+        """), {"resp": payload, "ah": aadhar_hash})
+        db.session.commit()
+
+        individual_id = get_last_inserted_id()
+
+        db.session.execute(sql_text("""
+            INSERT INTO main_individual_questionnaire_links
+            (main_questionnaire_id, individual_questionnaire_id, household_id, filled_by_user_id)
+            VALUES (:mid, :iid, :hid, :uid)
+        """), {
+            "mid": main_id,
+            "iid": individual_id,
+            "hid": household_id,
+            "uid": user_id
+        })
+        db.session.commit()
+
+        return jsonify({"success": True, "individual_questionnaire_id": individual_id})
+
+    except Exception as e:
+        db.session.rollback()
+        return json_error(str(e), 500, traceback.format_exc())
+
+@app.route("/api/admin/individual-lookup")
+@role_required("admin")
+def admin_individual_lookup():
+    aadhar = (request.args.get("aadhar") or "").strip()
+    if not aadhar:
+        return json_error("aadhar is required", 400)
+    aadhar_hash = hash_aadhar(aadhar)
+
+    try:
+        row = db.session.execute(sql_text("""
+            SELECT TOP 1 ir.individual_questionnaire_id, ir.responses,
+                   l.main_questionnaire_id, l.household_id
+            FROM individual_questionnaire_responses ir
+            JOIN main_individual_questionnaire_links l
+              ON l.individual_questionnaire_id = ir.individual_questionnaire_id
+            WHERE ir.aadhar_hash = :ah
+               OR JSON_VALUE(ir.responses, '$.member.aadhar') = :aadhar
+            ORDER BY ir.individual_questionnaire_id DESC
+        """), {"aadhar": aadhar, "ah": aadhar_hash}).mappings().fetchone()
+
+        if not row:
+            return jsonify({"found": False})
+
+        individual_resp = safe_json_load(row["responses"])
+        member = (individual_resp or {}).get("member") or {}
+        if member.get("aadhar"):
+            member["aadhar"] = decrypt_aadhar(member.get("aadhar"))
+
+        main_row = db.session.execute(sql_text("""
+            SELECT main_questionnaire_id, responses
+            FROM main_questionnaire_responses
+            WHERE main_questionnaire_id = :mid
+        """), {"mid": row["main_questionnaire_id"]}).mappings().fetchone()
+        main_resp = safe_json_load(main_row["responses"]) if main_row else None
+
+        members_rows = db.session.execute(sql_text("""
+            SELECT ir.individual_questionnaire_id, ir.responses
+            FROM individual_questionnaire_responses ir
+            JOIN main_individual_questionnaire_links l
+              ON l.individual_questionnaire_id = ir.individual_questionnaire_id
+            WHERE l.household_id = :hid
+            ORDER BY ir.individual_questionnaire_id ASC
+        """), {"hid": row["household_id"]}).mappings().all()
+
+        household_members = []
+        for r in members_rows:
+            resp = safe_json_load(r["responses"])
+            mem = (resp or {}).get("member") or {}
+            if mem.get("aadhar"):
+                mem["aadhar"] = decrypt_aadhar(mem.get("aadhar"))
+            household_members.append({
+                "individual_questionnaire_id": r["individual_questionnaire_id"],
+                "member": mem
+            })
+
+        return jsonify({
+            "found": True,
+            "individual_questionnaire_id": row["individual_questionnaire_id"],
+            "main_questionnaire_id": row["main_questionnaire_id"],
+            "household_id": row["household_id"],
+            "member": member,
+            "individual_response": individual_resp,
+            "main_response": main_resp,
+            "household_members": household_members
+        })
+
+    except Exception as e:
+        return json_error(str(e), 500, traceback.format_exc())
+
+
+@app.route("/api/admin/individual-lookup/export")
+@role_required("admin")
+def admin_individual_lookup_export():
+    aadhar = (request.args.get("aadhar") or "").strip()
+    scope = (request.args.get("scope") or "full").strip().lower()
+    if not aadhar:
+        return json_error("aadhar is required", 400)
+    if scope not in ("full", "main", "individual"):
+        return json_error("scope must be full, main, or individual", 400)
+    aadhar_hash = hash_aadhar(aadhar)
+
+    try:
+        row = db.session.execute(sql_text("""
+            SELECT TOP 1 ir.individual_questionnaire_id, ir.responses,
+                   l.main_questionnaire_id, l.household_id
+            FROM individual_questionnaire_responses ir
+            JOIN main_individual_questionnaire_links l
+              ON l.individual_questionnaire_id = ir.individual_questionnaire_id
+            WHERE ir.aadhar_hash = :ah
+               OR JSON_VALUE(ir.responses, '$.member.aadhar') = :aadhar
+            ORDER BY ir.individual_questionnaire_id DESC
+        """), {"aadhar": aadhar, "ah": aadhar_hash}).mappings().fetchone()
+
+        if not row:
+            return json_error("No individual found for this Aadhaar ID", 404)
+
+        individual_resp = safe_json_load(row["responses"]) or {}
+        member = (individual_resp or {}).get("member") or {}
+        if member.get("aadhar"):
+            member["aadhar"] = decrypt_aadhar(member.get("aadhar"))
+
+        main_row = db.session.execute(sql_text("""
+            SELECT main_questionnaire_id, responses
+            FROM main_questionnaire_responses
+            WHERE main_questionnaire_id = :mid
+        """), {"mid": row["main_questionnaire_id"]}).mappings().fetchone()
+        main_resp = safe_json_load(main_row["responses"]) if main_row else {}
+
+        rows = []
+        headers = [
+            "survey_type",
+            "household_id",
+            "main_questionnaire_id",
+            "individual_questionnaire_id",
+            "member_aadhar",
+            "member_name",
+            "section_order",
+            "section_title",
+            "question_order",
+            "question_id",
+            "question_text",
+            "answer",
+            "submitted_at",
+            "submitted_by",
+        ]
+
+        if scope in ("full", "main"):
+            main_index = build_question_index("questions", "questionnaire_sections")
+            main_payload = main_resp if isinstance(main_resp, dict) else {}
+            main_rows = build_export_rows(
+                (main_payload or {}).get("responses", {}),
+                main_index,
+                survey_type="main",
+                household_id=row["household_id"],
+                main_id=row["main_questionnaire_id"],
+                submitted_at=(main_payload or {}).get("submitted_at"),
+                submitted_by=(main_payload or {}).get("submitted_by_username"),
+                member=member,
+            )
+            rows.extend(main_rows)
+
+        if scope in ("full", "individual"):
+            ind_index = build_question_index("individual_questions", "individual_questionnaire_sections")
+            ind_payload = individual_resp if isinstance(individual_resp, dict) else {}
+            ind_rows = build_export_rows(
+                (ind_payload or {}).get("responses", {}),
+                ind_index,
+                survey_type="individual",
+                household_id=row["household_id"],
+                main_id=row["main_questionnaire_id"],
+                individual_id=row["individual_questionnaire_id"],
+                submitted_at=(ind_payload or {}).get("submitted_at"),
+                submitted_by=(ind_payload or {}).get("submitted_by_username"),
+                member=member,
+            )
+            rows.extend(ind_rows)
+
+        filename = f"aadhaar_{aadhar}_{scope}_export.csv"
+        return csv_response(filename, rows, headers)
+
+    except Exception as e:
+        return json_error(str(e), 500, traceback.format_exc())
+
+@app.route("/api/admin/individual-response/<int:individual_questionnaire_id>")
+@role_required("admin")
+def admin_get_individual_response(individual_questionnaire_id):
+    try:
+        row = db.session.execute(sql_text("""
+            SELECT individual_questionnaire_id, responses
+            FROM individual_questionnaire_responses
+            WHERE individual_questionnaire_id = :iid
+        """), {"iid": individual_questionnaire_id}).mappings().fetchone()
+        if not row:
+            return json_error("Individual response not found", 404)
+
+        try:
+            payload = json.loads(row["responses"]) if isinstance(row["responses"], str) else row["responses"]
+        except Exception:
+            payload = row["responses"]
+
+        try:
+            member = (payload or {}).get("member") or {}
+            if member.get("aadhar"):
+                member["aadhar"] = decrypt_aadhar(member.get("aadhar"))
+        except Exception:
+            pass
+
+        return jsonify({
+            "individual_questionnaire_id": row["individual_questionnaire_id"],
+            "responses": payload
+        })
+    except Exception as e:
+        return json_error(str(e), 500, traceback.format_exc())
+
+
+# ==========================================================
+# ADMIN APIs (READ)
+# ==========================================================
+
+@app.route("/api/admin/sections")
+@role_required("admin")
+def admin_get_sections():
+    try:
+        rows = db.session.execute(sql_text("""
+            SELECT
+                section_id,
+                section_title,
+                section_order,
+                CAST(COALESCE(show_on_user_end, 1) AS INT) AS show_on_user_end
+            FROM questionnaire_sections
+            ORDER BY section_order
+        """)).mappings().all()
+        return jsonify([dict(r) for r in rows])
+    except Exception as e:
+        return json_error(str(e), 500)
+
+@app.route("/api/admin/individual-sections")
+@role_required("admin")
+def admin_get_individual_sections():
+    try:
+        rows = db.session.execute(sql_text("""
+            SELECT
+                section_id,
+                section_title,
+                section_order,
+                CAST(COALESCE(show_on_user_end, 1) AS INT) AS show_on_user_end
+            FROM individual_questionnaire_sections
+            ORDER BY section_order
+        """)).mappings().all()
+        return jsonify([dict(r) for r in rows])
+    except Exception as e:
+        return json_error(str(e), 500)
+
+
+@app.route("/api/admin/section/<int:section_id>/questions")
+@role_required("admin")
+def admin_get_section_questions(section_id):
+    try:
+        rows = db.session.execute(
+            sql_text("SELECT * FROM questions WHERE question_section_id=:sid ORDER BY question_order"),
+            {"sid": section_id},
+        ).mappings().all()
+        return jsonify([dict(r) for r in rows])
+    except Exception as e:
+        return json_error(str(e), 500)
+
+
+@app.route("/api/admin/questions")
+@role_required("admin")
+def admin_get_questions():
+    try:
+        rows = db.session.execute(sql_text("""
+            SELECT
+                q.question_id,
+                q.question_section_id AS section_id,
+                s.section_title,
+                q.question_text,
+                q.question_type,
+                q.answer_type,
+                q.options,
+                q.parent_id,
+                q.trigger_value,
+                q.question_order,
+                q.is_mandatory,
+                q.created_at,
+                q.updated_at
+            FROM questions q
+            LEFT JOIN questionnaire_sections s ON s.section_id = q.question_section_id
+            ORDER BY q.question_order ASC
+        """)).mappings().all()
+        return jsonify([dict(r) for r in rows])
+    except Exception as e:
+        return json_error(str(e), 500)
+
+@app.route("/api/admin/individual-section/<int:section_id>/questions")
+@role_required("admin")
+def admin_get_individual_section_questions(section_id):
+    try:
+        rows = db.session.execute(
+            sql_text("SELECT * FROM individual_questions WHERE question_section_id=:sid ORDER BY question_order"),
+            {"sid": section_id},
+        ).mappings().all()
+        return jsonify([dict(r) for r in rows])
+    except Exception as e:
+        return json_error(str(e), 500)
+
+
+@app.route("/api/admin/users")
+@role_required("admin")
+def admin_get_users():
+    search = (request.args.get("search") or "").strip()
+    try:
+        if search:
+            rows = db.session.execute(
+                sql_text("SELECT user_id, username, created_at FROM users WHERE username LIKE :s ORDER BY username"),
+                {"s": f"%{search}%"},
+            ).mappings().all()
+        else:
+            rows = db.session.execute(
+                sql_text("SELECT user_id, username, created_at FROM users ORDER BY username")
+            ).mappings().all()
+        return jsonify([dict(r) for r in rows])
+    except Exception as e:
+        try:
+            if search:
+                rows = db.session.execute(
+                    sql_text("SELECT user_id, username FROM users WHERE username LIKE :s ORDER BY username"),
+                    {"s": f"%{search}%"},
+                ).mappings().all()
+            else:
+                rows = db.session.execute(
+                    sql_text("SELECT user_id, username FROM users ORDER BY username")
+                ).mappings().all()
+            payload = []
+            for r in rows:
+                item = dict(r)
+                item["created_at"] = None
+                payload.append(item)
+            return jsonify(payload)
+        except Exception:
+            return json_error(str(e), 500)
+
+
+@app.route("/api/admin/admins")
+@role_required("admin")
+def admin_get_admins():
+    try:
+        rows = db.session.execute(
+            sql_text("SELECT admin_id, username, created_at FROM admins ORDER BY username")
+        ).mappings().all()
+        return jsonify([dict(r) for r in rows])
+    except Exception as e:
+        try:
+            rows = db.session.execute(
+                sql_text("SELECT admin_id, username FROM admins ORDER BY username")
+            ).mappings().all()
+            payload = []
+            for r in rows:
+                item = dict(r)
+                item["created_at"] = None
+                payload.append(item)
+            return jsonify(payload)
+        except Exception:
+            return json_error(str(e), 500)
+
+
+@app.route("/api/admin/statistics")
+@role_required("admin")
+def admin_statistics_legacy():
+    def _count(table_name):
+        row = db.session.execute(sql_text(f"SELECT COUNT(*) AS cnt FROM {table_name}")).mappings().fetchone()
+        return int(row["cnt"]) if row else 0
+
+    try:
+        payload = {
+            "total_users": _count("users"),
+            "total_households": _count("households"),
+            "total_states": _count("states"),
+            "total_districts": _count("districts"),
+            "total_sections": _count("questionnaire_sections"),
+            "total_questions": _count("questions"),
+            "total_responses": _count("main_questionnaire_responses"),
+        }
+        return jsonify(payload)
+    except Exception as e:
+        return json_error(str(e), 500)
+
+
+@app.route("/api/admin/all-households")
+@app.route("/api/admin/households")
+@role_required("admin")
+def admin_get_all_households():
+    try:
+        search = (request.args.get("search") or "").strip()
+        base = """
+            SELECT DISTINCT
+                h.household_id,
+                h.name AS head_name,
+                COALESCE(u.username, u_owner.username, '—') AS username,
+                s.name AS state_name,
+                d.name AS district_name,
+                b.name AS block_name,
+                sc.name AS sub_center_name,
+                v.village_lgd_code AS village_lgd_code,
+                mqr.responses AS main_responses,
+                dr.response_data AS draft_data
+            FROM households h
+            LEFT JOIN (
+                SELECT household_id, MAX(main_questionnaire_id) AS main_questionnaire_id
+                FROM main_questionnaire_responses
+                GROUP BY household_id
+            ) mm ON mm.household_id = h.household_id
+            LEFT JOIN main_questionnaire_responses mqr ON mqr.main_questionnaire_id = mm.main_questionnaire_id
+            LEFT JOIN survey_contributors contrib ON contrib.main_questionnaire_id = mm.main_questionnaire_id
+            LEFT JOIN users u ON contrib.user_id = u.user_id
+            LEFT JOIN users u_owner ON h.user_id = u_owner.user_id
+            LEFT JOIN states s ON h.state_id = s.state_id
+            LEFT JOIN districts d ON h.district_id = d.district_id
+            LEFT JOIN blocks b ON h.block_id = b.block_id
+            LEFT JOIN sub_centers sc ON h.sub_center_id = sc.sub_center_id
+            LEFT JOIN villages v ON h.village_id = v.village_id
+            LEFT JOIN (
+                SELECT household_id, response_data
+                FROM (
+                    SELECT
+                        household_id,
+                        response_data,
+                        ROW_NUMBER() OVER (PARTITION BY household_id ORDER BY draft_id DESC) AS rn
+                    FROM household_response_drafts
+                ) d
+                WHERE rn = 1
+            ) dr ON dr.household_id = h.household_id
+        """
+        params = {}
+        if search:
+            base += " WHERE h.name LIKE :q OR u.username LIKE :q OR u_owner.username LIKE :q OR CAST(v.village_lgd_code AS NVARCHAR) LIKE :q OR CAST(h.household_id AS NVARCHAR) LIKE :q"
+            params["q"] = f"%{search}%"
+        base += " ORDER BY h.household_id DESC"
+        base = base.replace("SELECT DISTINCT\n", "SELECT DISTINCT TOP 500\n", 1)
+
+        rows = db.session.execute(sql_text(base), params).mappings().all()
+        all_section_ids = _main_section_ids()
+        result = []
+        for r in rows:
+            item = dict(r)
+            main_payload = safe_json_load(item.pop("main_responses", None))
+            draft_payload = safe_json_load(item.pop("draft_data", None))
+            item.update(_admin_household_status(main_payload, draft_payload, all_section_ids))
+            result.append(item)
+        return jsonify(result)
+    except Exception as e:
+        return json_error(str(e), 500)
+
+
+@app.route("/api/admin/household-locations")
+@role_required("admin")
+def admin_get_household_locations():
+    """Get all households with GPS coordinates for map display"""
+    try:
+        query = sql_text("""
+            SELECT
+                h.household_id,
+                h.name,
+                h.latitude,
+                h.longitude,
+                h.location_accuracy,
+                h.location_updated_at,
+                s.name AS state_name,
+                d.name AS district_name,
+                b.name AS block_name,
+                sc.name AS sub_center_name,
+                v.name AS village_name,
+                u.username
+            FROM households h
+            LEFT JOIN states s ON h.state_id = s.state_id
+            LEFT JOIN districts d ON h.district_id = d.district_id
+            LEFT JOIN blocks b ON h.block_id = b.block_id
+            LEFT JOIN sub_centers sc ON h.sub_center_id = sc.sub_center_id
+            LEFT JOIN villages v ON h.village_id = v.village_id
+            LEFT JOIN users u ON h.user_id = u.user_id
+            ORDER BY h.household_id DESC
+        """)
+        
+        rows = db.session.execute(query).mappings().all()
+        households = []
+        
+        for row in rows:
+            household = {
+                "household_id": row["household_id"],
+                "name": row["name"],
+                "latitude": float(row["latitude"]) if row["latitude"] else None,
+                "longitude": float(row["longitude"]) if row["longitude"] else None,
+                "location_accuracy": float(row["location_accuracy"]) if row["location_accuracy"] else None,
+                "location_updated_at": row["location_updated_at"].isoformat() if row["location_updated_at"] else None,
+                "state_name": row["state_name"],
+                "district_name": row["district_name"],
+                "block_name": row["block_name"],
+                "sub_center_name": row["sub_center_name"],
+                "village_name": row["village_name"],
+                "username": row["username"]
+            }
+            households.append(household)
+        
+        return jsonify({
+            "success": True,
+            "households": households
+        })
+    except Exception as e:
+        return json_error(str(e), 500)
+
+
+@app.route("/api/admin/households/filter")
+@role_required("admin")
+def admin_filter_households():
+    try:
+        search = (request.args.get("q") or "").strip()
+        state_id = safe_int(request.args.get("state_id"))
+        district_id = safe_int(request.args.get("district_id"))
+        block_id = safe_int(request.args.get("block_id"))
+        sub_center_id = safe_int(request.args.get("sub_center_id"))
+        village_id = safe_int(request.args.get("village_id"))
+
+        base = """
+            SELECT
+                h.household_id,
+                h.name AS head_name,
+                COALESCE(u.username, u_owner.username, '—') AS username,
+                s.name AS state_name,
+                d.name AS district_name,
+                b.name AS block_name,
+                sc.name AS sub_center_name,
+                v.village_lgd_code AS village_lgd_code
+            FROM households h
+            LEFT JOIN (
+                SELECT household_id, MAX(main_questionnaire_id) AS main_questionnaire_id
+                FROM main_questionnaire_responses
+                GROUP BY household_id
+            ) mm ON mm.household_id = h.household_id
+            LEFT JOIN survey_contributors contrib ON contrib.main_questionnaire_id = mm.main_questionnaire_id
+            LEFT JOIN users u ON contrib.user_id = u.user_id
+            LEFT JOIN users u_owner ON h.user_id = u_owner.user_id
+            LEFT JOIN states s ON h.state_id = s.state_id
+            LEFT JOIN districts d ON h.district_id = d.district_id
+            LEFT JOIN blocks b ON h.block_id = b.block_id
+            LEFT JOIN sub_centers sc ON h.sub_center_id = sc.sub_center_id
+            LEFT JOIN villages v ON h.village_id = v.village_id
+        """
+
+        filters = []
+        params = {}
+
+        if search:
+            filters.append("(h.name LIKE :q OR u.username LIKE :q OR u_owner.username LIKE :q OR CAST(v.village_lgd_code AS NVARCHAR) LIKE :q OR CAST(h.household_id AS NVARCHAR) LIKE :q)")
+            params["q"] = f"%{search}%"
+        if state_id:
+            filters.append("h.state_id = :state_id")
+            params["state_id"] = state_id
+        if district_id:
+            filters.append("h.district_id = :district_id")
+            params["district_id"] = district_id
+        if block_id:
+            filters.append("h.block_id = :block_id")
+            params["block_id"] = block_id
+        if sub_center_id:
+            filters.append("h.sub_center_id = :sub_center_id")
+            params["sub_center_id"] = sub_center_id
+        if village_id:
+            filters.append("h.village_id = :village_id")
+            params["village_id"] = village_id
+
+        if filters:
+            base += " WHERE " + " AND ".join(filters)
+
+        base += " ORDER BY h.household_id DESC"
+        base = base.replace("SELECT\n", "SELECT TOP 500\n", 1)
+
+        rows = db.session.execute(sql_text(base), params).mappings().all()
+        return jsonify([dict(r) for r in rows])
+    except Exception as e:
+        return json_error(str(e), 500)
+
+
+@app.route("/api/admin/households/count")
+@role_required("admin")
+def admin_count_households():
+    try:
+        state_id = safe_int(request.args.get("state_id"))
+        district_id = safe_int(request.args.get("district_id"))
+        block_id = safe_int(request.args.get("block_id"))
+        sub_center_id = safe_int(request.args.get("sub_center_id"))
+        village_id = safe_int(request.args.get("village_id"))
+
+        base = """
+            SELECT COUNT(*) AS cnt
+            FROM households h
+        """
+        filters = []
+        params = {}
+        if state_id:
+            filters.append("h.state_id = :state_id")
+            params["state_id"] = state_id
+        if district_id:
+            filters.append("h.district_id = :district_id")
+            params["district_id"] = district_id
+        if block_id:
+            filters.append("h.block_id = :block_id")
+            params["block_id"] = block_id
+        if sub_center_id:
+            filters.append("h.sub_center_id = :sub_center_id")
+            params["sub_center_id"] = sub_center_id
+        if village_id:
+            filters.append("h.village_id = :village_id")
+            params["village_id"] = village_id
+
+        if filters:
+            base += " WHERE " + " AND ".join(filters)
+
+        row = db.session.execute(sql_text(base), params).mappings().fetchone()
+        count = int(row["cnt"]) if row and "cnt" in row else 0
+        return jsonify({"total_households": count})
+    except Exception as e:
+        return json_error(str(e), 500, traceback.format_exc())
+
+
+@app.route("/api/admin/households/export")
+@role_required("admin")
+def admin_export_household_responses():
+    try:
+        state_id = safe_int(request.args.get("state_id"))
+        district_id = safe_int(request.args.get("district_id"))
+        block_id = safe_int(request.args.get("block_id"))
+        sub_center_id = safe_int(request.args.get("sub_center_id"))
+        village_id = safe_int(request.args.get("village_id"))
+
+        base = """
+            SELECT
+                h.household_id,
+                TRIM(h.name) AS head_name,
+                COALESCE(TRIM(u.username), '-') AS username,
+                TRIM(s.name) AS state_name,
+                TRIM(d.name) AS district_name,
+                TRIM(b.name) AS block_name,
+                TRIM(sc.name) AS sub_center_name,
+                TRIM(v.name) AS village_name,
+                v.village_lgd_code AS village_lgd_code,
+                m.main_questionnaire_id,
+                m.responses
+            FROM households h
+            INNER JOIN users u ON h.user_id = u.user_id
+            INNER JOIN states s ON h.state_id = s.state_id
+            INNER JOIN districts d ON h.district_id = d.district_id
+            INNER JOIN blocks b ON h.block_id = b.block_id
+            INNER JOIN sub_centers sc ON h.sub_center_id = sc.sub_center_id
+            INNER JOIN villages v ON h.village_id = v.village_id
+            INNER JOIN (
+                SELECT household_id, MAX(main_questionnaire_id) AS main_questionnaire_id
+                FROM main_questionnaire_responses
+                GROUP BY household_id
+            ) mm ON mm.household_id = h.household_id
+            INNER JOIN main_questionnaire_responses m ON m.main_questionnaire_id = mm.main_questionnaire_id
+        """
+
+        filters = []
+        params = {}
+        if state_id:
+            filters.append("h.state_id = :state_id")
+            params["state_id"] = state_id
+        if district_id:
+            filters.append("h.district_id = :district_id")
+            params["district_id"] = district_id
+        if block_id:
+            filters.append("h.block_id = :block_id")
+            params["block_id"] = block_id
+        if sub_center_id:
+            filters.append("h.sub_center_id = :sub_center_id")
+            params["sub_center_id"] = sub_center_id
+        if village_id:
+            filters.append("h.village_id = :village_id")
+            params["village_id"] = village_id
+
+        if filters:
+            base += " WHERE " + " AND ".join(filters)
+        base += " ORDER BY h.household_id DESC"
+
+        rows = db.session.execute(sql_text(base), params).mappings().all()
+
+        question_index = build_question_index("questions", "questionnaire_sections")
+        headers = [
+            "survey_type",
+            "household_id",
+            "head_name",
+            "username",
+            "state_name",
+            "district_name",
+            "block_name",
+            "sub_center_name",
+            "village_name",
+            "village_lgd_code",
+            "main_questionnaire_id",
+            "individual_questionnaire_id",
+            "member_aadhar",
+            "member_name",
+            "section_order",
+            "section_title",
+            "question_order",
+            "question_id",
+            "question_text",
+            "answer",
+            "submitted_at",
+            "submitted_by",
+        ]
+
+        out_rows = []
+        for r in rows:
+            payload = safe_json_load(r["responses"]) if r.get("responses") else {}
+            main_rows = build_export_rows(
+                (payload or {}).get("responses", {}),
+                question_index,
+                survey_type="main",
+                household_id=r.get("household_id"),
+                main_id=r.get("main_questionnaire_id"),
+                submitted_at=(payload or {}).get("submitted_at"),
+                submitted_by=(payload or {}).get("submitted_by_username"),
+            )
+            if not main_rows:
+                continue
+            extra = {
+                "head_name": r.get("head_name") or "",
+                "username": r.get("username") or "",
+                "state_name": r.get("state_name") or "",
+                "district_name": r.get("district_name") or "",
+                "block_name": r.get("block_name") or "",
+                "sub_center_name": r.get("sub_center_name") or "",
+                "village_name": r.get("village_name") or "",
+                "village_lgd_code": r.get("village_lgd_code") or "",
+            }
+            for row in main_rows:
+                row.update(extra)
+            out_rows.extend(main_rows)
+
+        filename = "household_responses_export.csv"
+        return csv_response(filename, out_rows, headers)
+    except Exception as e:
+        return json_error(str(e), 500, traceback.format_exc())
+
+
+@app.route("/api/admin/households/export/main-wide")
+@role_required("admin")
+def admin_export_main_wide():
+    try:
+        state_id = safe_int(request.args.get("state_id"))
+        district_id = safe_int(request.args.get("district_id"))
+        block_id = safe_int(request.args.get("block_id"))
+        sub_center_id = safe_int(request.args.get("sub_center_id"))
+        village_id = safe_int(request.args.get("village_id"))
+
+        base = """
+            SELECT
+                h.household_id,
+                TRIM(h.name) AS head_name,
+                COALESCE(TRIM(u.username), '-') AS username,
+                TRIM(s.name) AS state_name,
+                TRIM(d.name) AS district_name,
+                TRIM(b.name) AS block_name,
+                TRIM(sc.name) AS sub_center_name,
+                TRIM(v.name) AS village_name,
+                v.village_lgd_code AS village_lgd_code,
+                m.main_questionnaire_id,
+                m.responses
+            FROM households h
+            INNER JOIN users u ON h.user_id = u.user_id
+            INNER JOIN states s ON h.state_id = s.state_id
+            INNER JOIN districts d ON h.district_id = d.district_id
+            INNER JOIN blocks b ON h.block_id = b.block_id
+            INNER JOIN sub_centers sc ON h.sub_center_id = sc.sub_center_id
+            INNER JOIN villages v ON h.village_id = v.village_id
+            INNER JOIN (
+                SELECT household_id, MAX(main_questionnaire_id) AS main_questionnaire_id
+                FROM main_questionnaire_responses
+                GROUP BY household_id
+            ) mm ON mm.household_id = h.household_id
+            INNER JOIN main_questionnaire_responses m ON m.main_questionnaire_id = mm.main_questionnaire_id
+        """
+        filters = []
+        params = {}
+        if state_id:
+            filters.append("h.state_id = :state_id")
+            params["state_id"] = state_id
+        if district_id:
+            filters.append("h.district_id = :district_id")
+            params["district_id"] = district_id
+        if block_id:
+            filters.append("h.block_id = :block_id")
+            params["block_id"] = block_id
+        if sub_center_id:
+            filters.append("h.sub_center_id = :sub_center_id")
+            params["sub_center_id"] = sub_center_id
+        if village_id:
+            filters.append("h.village_id = :village_id")
+            params["village_id"] = village_id
+        if filters:
+            base += " WHERE " + " AND ".join(filters)
+        base += " ORDER BY h.household_id DESC"
+
+        rows = db.session.execute(sql_text(base), params).mappings().all()
+
+        question_index = build_question_index("questions", "questionnaire_sections")
+        q_headers, q_map = build_wide_headers(question_index)
+
+        headers = [
+            "household_id",
+            "head_name",
+            "username",
+            "state_name",
+            "district_name",
+            "block_name",
+            "sub_center_name",
+            "village_name",
+            "village_lgd_code",
+            "main_questionnaire_id",
+            "submitted_at",
+            "submitted_by",
+        ] + q_headers
+
+        out_rows = []
+        for r in rows:
+            payload = safe_json_load(r["responses"]) if r.get("responses") else {}
+            base_row = {
+                "household_id": r.get("household_id") or "",
+                "head_name": r.get("head_name") or "",
+                "username": r.get("username") or "",
+                "state_name": r.get("state_name") or "",
+                "district_name": r.get("district_name") or "",
+                "block_name": r.get("block_name") or "",
+                "sub_center_name": r.get("sub_center_name") or "",
+                "village_name": r.get("village_name") or "",
+                "village_lgd_code": r.get("village_lgd_code") or "",
+                "main_questionnaire_id": r.get("main_questionnaire_id") or "",
+                "submitted_at": (payload or {}).get("submitted_at") or "",
+                "submitted_by": (payload or {}).get("submitted_by_username") or "",
+            }
+            wide = build_wide_row((payload or {}).get("responses", {}), q_map)
+            base_row.update(wide)
+            out_rows.append(base_row)
+
+        return csv_response("main_questionnaire_wide.csv", out_rows, headers)
+    except Exception as e:
+        return json_error(str(e), 500, traceback.format_exc())
+
+
+@app.route("/api/admin/households/export/individual-wide")
+@role_required("admin")
+def admin_export_individual_wide():
+    try:
+        state_id = safe_int(request.args.get("state_id"))
+        district_id = safe_int(request.args.get("district_id"))
+        block_id = safe_int(request.args.get("block_id"))
+        sub_center_id = safe_int(request.args.get("sub_center_id"))
+        village_id = safe_int(request.args.get("village_id"))
+
+        base = """
+            SELECT
+                h.household_id,
+                TRIM(h.name) AS head_name,
+                COALESCE(TRIM(u.username), '-') AS username,
+                TRIM(s.name) AS state_name,
+                TRIM(d.name) AS district_name,
+                TRIM(b.name) AS block_name,
+                TRIM(sc.name) AS sub_center_name,
+                TRIM(v.name) AS village_name,
+                v.village_lgd_code AS village_lgd_code,
+                l.main_questionnaire_id,
+                ir.individual_questionnaire_id,
+                ir.responses
+            FROM individual_questionnaire_responses ir
+            INNER JOIN main_individual_questionnaire_links l
+                ON l.individual_questionnaire_id = ir.individual_questionnaire_id
+            INNER JOIN households h ON h.household_id = l.household_id
+            INNER JOIN users u ON h.user_id = u.user_id
+            INNER JOIN states s ON h.state_id = s.state_id
+            INNER JOIN districts d ON h.district_id = d.district_id
+            INNER JOIN blocks b ON h.block_id = b.block_id
+            INNER JOIN sub_centers sc ON h.sub_center_id = sc.sub_center_id
+            INNER JOIN villages v ON h.village_id = v.village_id
+        """
+        filters = []
+        params = {}
+        if state_id:
+            filters.append("h.state_id = :state_id")
+            params["state_id"] = state_id
+        if district_id:
+            filters.append("h.district_id = :district_id")
+            params["district_id"] = district_id
+        if block_id:
+            filters.append("h.block_id = :block_id")
+            params["block_id"] = block_id
+        if sub_center_id:
+            filters.append("h.sub_center_id = :sub_center_id")
+            params["sub_center_id"] = sub_center_id
+        if village_id:
+            filters.append("h.village_id = :village_id")
+            params["village_id"] = village_id
+        if filters:
+            base += " WHERE " + " AND ".join(filters)
+        base += " ORDER BY ir.individual_questionnaire_id DESC"
+
+        rows = db.session.execute(sql_text(base), params).mappings().all()
+
+        question_index = build_question_index("individual_questions", "individual_questionnaire_sections")
+        q_headers, q_map = build_wide_headers(question_index)
+
+        headers = [
+            "household_id",
+            "head_name",
+            "username",
+            "state_name",
+            "district_name",
+            "block_name",
+            "sub_center_name",
+            "village_name",
+            "village_lgd_code",
+            "main_questionnaire_id",
+            "individual_questionnaire_id",
+            "member_name",
+            "member_aadhar",
+            "submitted_at",
+            "submitted_by",
+        ] + q_headers
+
+        out_rows = []
+        for r in rows:
+            payload = safe_json_load(r["responses"]) if r.get("responses") else {}
+            member = (payload or {}).get("member") or {}
+            if member.get("aadhar"):
+                try:
+                    member["aadhar"] = decrypt_aadhar(member.get("aadhar"))
+                except Exception:
+                    pass
+            member_name = " ".join([member.get("first_name", ""), member.get("middle_name", ""), member.get("surname", "")]).strip()
+            base_row = {
+                "household_id": r.get("household_id") or "",
+                "head_name": r.get("head_name") or "",
+                "username": r.get("username") or "",
+                "state_name": r.get("state_name") or "",
+                "district_name": r.get("district_name") or "",
+                "block_name": r.get("block_name") or "",
+                "sub_center_name": r.get("sub_center_name") or "",
+                "village_name": r.get("village_name") or "",
+                "village_lgd_code": r.get("village_lgd_code") or "",
+                "main_questionnaire_id": r.get("main_questionnaire_id") or "",
+                "individual_questionnaire_id": r.get("individual_questionnaire_id") or "",
+                "member_name": member_name,
+                "member_aadhar": member.get("aadhar") or "",
+                "submitted_at": (payload or {}).get("submitted_at") or "",
+                "submitted_by": (payload or {}).get("submitted_by_username") or "",
+            }
+            wide = build_wide_row((payload or {}).get("responses", {}), q_map)
+            base_row.update(wide)
+            out_rows.append(base_row)
+
+        return csv_response("individual_questionnaire_wide.csv", out_rows, headers)
+    except Exception as e:
+        return json_error(str(e), 500, traceback.format_exc())
+
+
+@app.route("/api/admin/households/export/count")
+@role_required("admin")
+def admin_export_household_responses_count():
+    try:
+        state_id = safe_int(request.args.get("state_id"))
+        district_id = safe_int(request.args.get("district_id"))
+        block_id = safe_int(request.args.get("block_id"))
+        sub_center_id = safe_int(request.args.get("sub_center_id"))
+        village_id = safe_int(request.args.get("village_id"))
+
+        base = """
+            SELECT COUNT(DISTINCT h.household_id) AS cnt
+            FROM households h
+            INNER JOIN users u ON h.user_id = u.user_id
+            INNER JOIN states s ON h.state_id = s.state_id
+            INNER JOIN districts d ON h.district_id = d.district_id
+            INNER JOIN blocks b ON h.block_id = b.block_id
+            INNER JOIN sub_centers sc ON h.sub_center_id = sc.sub_center_id
+            INNER JOIN villages v ON h.village_id = v.village_id
+            INNER JOIN (
+                SELECT household_id, MAX(main_questionnaire_id) AS main_questionnaire_id
+                FROM main_questionnaire_responses
+                GROUP BY household_id
+            ) mm ON mm.household_id = h.household_id
+            INNER JOIN main_questionnaire_responses m ON m.main_questionnaire_id = mm.main_questionnaire_id
+        """
+        filters = []
+        params = {}
+        if state_id:
+            filters.append("h.state_id = :state_id")
+            params["state_id"] = state_id
+        if district_id:
+            filters.append("h.district_id = :district_id")
+            params["district_id"] = district_id
+        if block_id:
+            filters.append("h.block_id = :block_id")
+            params["block_id"] = block_id
+        if sub_center_id:
+            filters.append("h.sub_center_id = :sub_center_id")
+            params["sub_center_id"] = sub_center_id
+        if village_id:
+            filters.append("h.village_id = :village_id")
+            params["village_id"] = village_id
+
+        if filters:
+            base += " WHERE " + " AND ".join(filters)
+
+        row = db.session.execute(sql_text(base), params).mappings().fetchone()
+        count = int(row["cnt"]) if row and "cnt" in row else 0
+        return jsonify({"total_households": count})
+    except Exception as e:
+        return json_error(str(e), 500, traceback.format_exc())
+
+
+@app.route("/api/admin/search-households")
+@role_required("admin")
+def admin_search_households():
+    q = (request.args.get("q") or "").strip()
+    if not q:
+        return jsonify([])
+    params = {"q": f"%{q}%"}
+    rows = db.session.execute(sql_text("""
+        SELECT TOP 500
+            h.household_id,
+            h.name AS head_name,
+            COALESCE(u.username, u_owner.username, '—') AS username,
+            v.village_lgd_code AS village_lgd_code
+        FROM households h
+        LEFT JOIN users u ON u.user_id = h.user_id
+        LEFT JOIN villages v ON v.village_id = h.village_id
+        WHERE h.name LIKE :q
+           OR CAST(v.village_lgd_code AS NVARCHAR) LIKE :q
+           OR u.username LIKE :q
+           OR CAST(h.household_id AS NVARCHAR) LIKE :q
+        ORDER BY h.household_id DESC
+    """), params).mappings().all()
+    return jsonify([dict(r) for r in rows])
+
+
+@app.route("/api/admin/household/<int:household_id>", methods=["DELETE"])
+@role_required("admin")
+def admin_delete_household(household_id):
+    try:
+        def table_exists(name: str) -> bool:
+            row = db.session.execute(sql_text("""
+                SELECT TOP 1 1
+                FROM information_schema.tables
+                WHERE table_catalog = DB_NAME() AND table_name = :t
+            """), {"t": name}).mappings().fetchone()
+            return bool(row)
+
+        def table_has_column(name: str, col: str) -> bool:
+            row = db.session.execute(sql_text("""
+                SELECT TOP 1 1
+                FROM information_schema.columns
+                WHERE table_catalog = DB_NAME()
+                  AND table_name = :t
+                  AND column_name = :c
+            """), {"t": name, "c": col}).mappings().fetchone()
+            return bool(row)
+
+        exists = db.session.execute(
+            sql_text("SELECT household_id FROM households WHERE household_id = :hid"),
+            {"hid": household_id},
+        ).mappings().fetchone()
+        if not exists:
+            return json_error("Household not found", 404)
+
+        # Delete dependent records in safe order, but only if tables/columns exist
+        if table_exists("household_response_drafts"):
+            db.session.execute(
+                sql_text("DELETE FROM household_response_drafts WHERE household_id = :hid"),
+                {"hid": household_id},
+            )
+
+        if table_exists("main_individual_questionnaire_links"):
+            if table_exists("individual_questionnaire_responses"):
+                db.session.execute(sql_text("""
+                    DELETE FROM individual_questionnaire_responses
+                    WHERE individual_questionnaire_id IN (
+                        SELECT individual_questionnaire_id
+                        FROM main_individual_questionnaire_links
+                        WHERE household_id = :hid
+                    )
+                """), {"hid": household_id})
+
+            db.session.execute(
+                sql_text("DELETE FROM main_individual_questionnaire_links WHERE household_id = :hid"),
+                {"hid": household_id},
+            )
+
+        if table_exists("main_questionnaire_responses"):
+            db.session.execute(
+                sql_text("DELETE FROM main_questionnaire_responses WHERE household_id = :hid"),
+                {"hid": household_id},
+            )
+
+        # Clean up person/survey_attempt tables if present
+        for person_table in ["persons", "person"]:
+            if table_exists(person_table) and table_has_column(person_table, "household_id"):
+                for attempt_table in ["survey_attempts", "survey_attempt"]:
+                    if table_exists(attempt_table) and table_has_column(attempt_table, "person_id"):
+                        db.session.execute(sql_text(f"""
+                            DELETE FROM {attempt_table}
+                            WHERE person_id IN (
+                                SELECT person_id FROM {person_table} WHERE household_id = :hid
+                            )
+                        """), {"hid": household_id})
+                db.session.execute(
+                    sql_text(f"DELETE FROM {person_table} WHERE household_id = :hid"),
+                    {"hid": household_id},
+                )
+
+        db.session.execute(
+            sql_text("DELETE FROM households WHERE household_id = :hid"),
+            {"hid": household_id},
+        )
+
+        db.session.commit()
+        return jsonify({"success": True})
+    except Exception as e:
+        db.session.rollback()
+        return json_error(str(e), 500, traceback.format_exc())
+
+
+@app.route("/api/admin/search-users")
+@role_required("admin")
+def admin_search_users():
+    q = (request.args.get("q") or "").strip()
+    if not q:
+        return jsonify([])
+    params = {"q": f"%{q}%"}
+    try:
+        rows = db.session.execute(sql_text("""
+            SELECT user_id, username, created_at
+            FROM users
+            WHERE username LIKE :q
+            ORDER BY username
+        """), params).mappings().all()
+        return jsonify([dict(r) for r in rows])
+    except Exception as e:
+        try:
+            rows = db.session.execute(sql_text("""
+                SELECT user_id, username
+                FROM users
+                WHERE username LIKE :q
+                ORDER BY username
+            """), params).mappings().all()
+            payload = []
+            for r in rows:
+                item = dict(r)
+                item["created_at"] = None
+                payload.append(item)
+            return jsonify(payload)
+        except Exception:
+            return json_error(str(e), 500)
+
+
+# ==========================================================
+# ADMIN APIs (WRITE) - SECTIONS
+# ==========================================================
+
+@app.route("/api/admin/section", methods=["POST"])
+@role_required("admin")
+def admin_create_section():
+    try:
+        data = json_body()
+        title = (data.get("section_title") or data.get("title") or "").strip()
+        if not title:
+            return json_error("section_title is required", 400)
+
+        show_on_user_end = safe_int(data.get("show_on_user_end"))
+        if show_on_user_end not in (0, 1):
+            show_on_user_end = 1
+
+        next_order = db.session.execute(sql_text("""
+            SELECT COALESCE(MAX(section_order), 0) + 1 AS next_order
+            FROM questionnaire_sections
+        """)).mappings().fetchone()["next_order"]
+
+        if column_exists("questionnaire_sections", "show_on_user_end"):
+            db.session.execute(sql_text("""
+                INSERT INTO questionnaire_sections (section_title, section_order, show_on_user_end)
+                VALUES (:t, :o, :show)
+            """), {"t": title, "o": next_order, "show": show_on_user_end})
+        else:
+            db.session.execute(sql_text("""
+                INSERT INTO questionnaire_sections (section_title, section_order)
+                VALUES (:t, :o)
+            """), {"t": title, "o": next_order})
+        db.session.commit()
+
+        new_id = get_last_inserted_id()
+        return jsonify({"success": True, "section_id": new_id, "section_order": next_order})
+
+    except Exception as e:
+        db.session.rollback()
+        return json_error(str(e), 500, traceback.format_exc())
+
+
+@app.route("/api/admin/section/<int:section_id>", methods=["PUT"])
+@role_required("admin")
+def admin_update_section(section_id):
+    try:
+        data = json_body()
+        title = (data.get("section_title") or data.get("title") or "").strip()
+        show_on_user_end = data.get("show_on_user_end")
+
+        updates = []
+        params = {"id": section_id}
+
+        if title:
+            updates.append("section_title = :t")
+            params["t"] = title
+
+        if show_on_user_end is not None and column_exists("questionnaire_sections", "show_on_user_end"):
+            show_val = safe_int(show_on_user_end)
+            if show_val not in (0, 1):
+                return json_error("show_on_user_end must be 0 or 1", 400)
+            updates.append("show_on_user_end = :show")
+            params["show"] = show_val
+
+        if not updates:
+            return json_error("No valid fields to update", 400)
+
+        db.session.execute(sql_text(f"""
+            UPDATE questionnaire_sections
+            SET {', '.join(updates)}
+            WHERE section_id = :id
+        """), params)
+        db.session.commit()
+        return jsonify({"success": True})
+
+    except Exception as e:
+        db.session.rollback()
+        return json_error(str(e), 500, traceback.format_exc())
+
+
+@app.route("/api/admin/section/<int:section_id>", methods=["DELETE"])
+@role_required("admin")
+def admin_delete_section(section_id):
+    try:
+        # if you want cascade, ensure FK constraints in DB. Otherwise delete questions first:
+        db.session.execute(sql_text("DELETE FROM questions WHERE question_section_id = :sid"), {"sid": section_id})
+        db.session.execute(sql_text("DELETE FROM questionnaire_sections WHERE section_id = :sid"), {"sid": section_id})
+        db.session.commit()
+        return jsonify({"success": True})
+    except Exception as e:
+        db.session.rollback()
+        return json_error(str(e), 500, traceback.format_exc())
+
+
+# ==========================================================
+# ADMIN APIs (WRITE) - LOCATIONS
+# ==========================================================
+
+@app.route("/api/admin/state", methods=["POST"])
+@role_required("admin")
+def admin_create_state():
+    try:
+        data = json_body()
+        name = (data.get("name") or "").strip()
+        if not name:
+            return json_error("name is required", 400)
+
+        columns = []
+        params = {}
+
+        # state_id may not be auto-increment in some schemas
+        if column_exists("states", "state_id") and not column_is_auto_increment("states", "state_id"):
+            columns.append("state_id")
+            params["state_id"] = next_id("states", "state_id")
+
+        columns.append("name")
+        params["name"] = name
+
+        if column_exists("states", "territory_type"):
+            territory_type = (data.get("territory_type") or "STATE").strip()
+            columns.append("territory_type")
+            params["territory_type"] = territory_type
+
+        cols_sql = ", ".join(columns)
+        vals_sql = ", ".join(f":{c}" for c in columns)
+        db.session.execute(sql_text(f"""
+            INSERT INTO states ({cols_sql})
+            VALUES ({vals_sql})
+        """), params)
+        db.session.commit()
+        return jsonify({"success": True})
+    except Exception as e:
+        db.session.rollback()
+        return json_error(str(e), 500, traceback.format_exc())
+
+
+@app.route("/api/admin/state/<int:state_id>", methods=["PUT"])
+@role_required("admin")
+def admin_update_state(state_id):
+    try:
+        data = json_body()
+        name = (data.get("name") or "").strip()
+        if not name:
+            return json_error("name is required", 400)
+
+        if column_exists("states", "territory_type"):
+            territory_type = (data.get("territory_type") or "STATE").strip()
+            db.session.execute(sql_text("""
+                UPDATE states
+                SET name = :name,
+                    territory_type = :territory_type
+                WHERE state_id = :id
+            """), {"name": name, "territory_type": territory_type, "id": state_id})
+        else:
+            db.session.execute(sql_text("""
+                UPDATE states
+                SET name = :name
+                WHERE state_id = :id
+            """), {"name": name, "id": state_id})
+        db.session.commit()
+        return jsonify({"success": True})
+    except Exception as e:
+        db.session.rollback()
+        return json_error(str(e), 500, traceback.format_exc())
+
+@app.route("/api/admin/individual-section/<int:section_id>", methods=["DELETE"])
+@role_required("admin")
+def admin_delete_individual_section(section_id):
+    try:
+        db.session.execute(sql_text("DELETE FROM individual_questions WHERE question_section_id = :sid"), {"sid": section_id})
+        db.session.execute(sql_text("DELETE FROM individual_questionnaire_sections WHERE section_id = :sid"), {"sid": section_id})
+        db.session.commit()
+        return jsonify({"success": True})
+    except Exception as e:
+        db.session.rollback()
+        return json_error(str(e), 500, traceback.format_exc())
+
+@app.route("/api/admin/individual-section/<int:section_id>", methods=["PUT"])
+@role_required("admin")
+def admin_update_individual_section(section_id):
+    try:
+        data = json_body()
+        title = (data.get("section_title") or data.get("title") or "").strip()
+        if not title:
+            return json_error("section_title is required", 400)
+
+        db.session.execute(sql_text("""
+            UPDATE individual_questionnaire_sections
+            SET section_title = :t
+            WHERE section_id = :id
+        """), {"t": title, "id": section_id})
+        db.session.commit()
+        return jsonify({"success": True})
+
+    except Exception as e:
+        db.session.rollback()
+        return json_error(str(e), 500, traceback.format_exc())
+
+@app.route("/api/admin/individual-section", methods=["POST"])
+@role_required("admin")
+def admin_create_individual_section():
+    try:
+        data = json_body()
+        title = (data.get("section_title") or data.get("title") or "").strip()
+        if not title:
+            return json_error("section_title is required", 400)
+
+        next_order = db.session.execute(sql_text("""
+            SELECT COALESCE(MAX(section_order), 0) + 1 AS next_order
+            FROM individual_questionnaire_sections
+        """)).mappings().fetchone()["next_order"]
+
+        db.session.execute(sql_text("""
+            INSERT INTO individual_questionnaire_sections (section_title, section_order)
+            VALUES (:t, :o)
+        """), {"t": title, "o": next_order})
+        db.session.commit()
+
+        new_id = get_last_inserted_id()
+        return jsonify({"success": True, "section_id": new_id, "section_order": next_order})
+
+    except Exception as e:
+        db.session.rollback()
+        return json_error(str(e), 500, traceback.format_exc())
+
+
+@app.route("/api/admin/state/<int:state_id>", methods=["DELETE"])
+@role_required("admin")
+def admin_delete_state(state_id):
+    try:
+        db.session.execute(sql_text("DELETE FROM states WHERE state_id = :id"), {"id": state_id})
+        db.session.commit()
+        return jsonify({"success": True})
+    except Exception as e:
+        db.session.rollback()
+        return json_error(str(e), 500, traceback.format_exc())
+
+
+@app.route("/api/admin/district", methods=["POST"])
+@role_required("admin")
+def admin_create_district():
+    try:
+        data = json_body()
+        name = (data.get("name") or "").strip()
+        state_id = safe_int(data.get("state_id"))
+        if not name or not state_id:
+            return json_error("name and state_id are required", 400)
+
+        columns = []
+        params = {"name": name, "state_id": state_id}
+
+        if column_exists("districts", "district_id") and not column_is_auto_increment("districts", "district_id"):
+            columns.append("district_id")
+            params["district_id"] = next_id("districts", "district_id")
+
+        columns += ["name", "state_id"]
+        cols_sql = ", ".join(columns)
+        vals_sql = ", ".join(f":{c}" for c in columns)
+        db.session.execute(sql_text(f"""
+            INSERT INTO districts ({cols_sql})
+            VALUES ({vals_sql})
+        """), params)
+        db.session.commit()
+        return jsonify({"success": True})
+    except Exception as e:
+        db.session.rollback()
+        return json_error(str(e), 500, traceback.format_exc())
+
+
+@app.route("/api/admin/district/<int:district_id>", methods=["PUT"])
+@role_required("admin")
+def admin_update_district(district_id):
+    try:
+        data = json_body()
+        name = (data.get("name") or "").strip()
+        state_id = safe_int(data.get("state_id"))
+        if not name or not state_id:
+            return json_error("name and state_id are required", 400)
+
+        db.session.execute(sql_text("""
+            UPDATE districts
+            SET name = :name,
+                state_id = :state_id
+            WHERE district_id = :id
+        """), {"name": name, "state_id": state_id, "id": district_id})
+        db.session.commit()
+        return jsonify({"success": True})
+    except Exception as e:
+        db.session.rollback()
+        return json_error(str(e), 500, traceback.format_exc())
+
+
+@app.route("/api/admin/district/<int:district_id>", methods=["DELETE"])
+@role_required("admin")
+def admin_delete_district(district_id):
+    try:
+        db.session.execute(sql_text("DELETE FROM districts WHERE district_id = :id"), {"id": district_id})
+        db.session.commit()
+        return jsonify({"success": True})
+    except Exception as e:
+        db.session.rollback()
+        return json_error(str(e), 500, traceback.format_exc())
+
+
+@app.route("/api/admin/block", methods=["POST"])
+@role_required("admin")
+def admin_create_block():
+    try:
+        data = json_body()
+        name = (data.get("name") or "").strip()
+        district_id = safe_int(data.get("district_id"))
+        if not name or not district_id:
+            return json_error("name and district_id are required", 400)
+
+        columns = []
+        params = {"name": name, "district_id": district_id}
+
+        if column_exists("blocks", "block_id") and not column_is_auto_increment("blocks", "block_id"):
+            columns.append("block_id")
+            params["block_id"] = next_id("blocks", "block_id")
+
+        columns += ["name", "district_id"]
+        cols_sql = ", ".join(columns)
+        vals_sql = ", ".join(f":{c}" for c in columns)
+        db.session.execute(sql_text(f"""
+            INSERT INTO blocks ({cols_sql})
+            VALUES ({vals_sql})
+        """), params)
+        db.session.commit()
+        return jsonify({"success": True})
+    except Exception as e:
+        db.session.rollback()
+        return json_error(str(e), 500, traceback.format_exc())
+
+
+@app.route("/api/admin/block/<int:block_id>", methods=["PUT"])
+@role_required("admin")
+def admin_update_block(block_id):
+    try:
+        data = json_body()
+        name = (data.get("name") or "").strip()
+        district_id = safe_int(data.get("district_id"))
+        if not name or not district_id:
+            return json_error("name and district_id are required", 400)
+
+        db.session.execute(sql_text("""
+            UPDATE blocks
+            SET name = :name,
+                district_id = :district_id
+            WHERE block_id = :id
+        """), {"name": name, "district_id": district_id, "id": block_id})
+        db.session.commit()
+        return jsonify({"success": True})
+    except Exception as e:
+        db.session.rollback()
+        return json_error(str(e), 500, traceback.format_exc())
+
+
+@app.route("/api/admin/block/<int:block_id>", methods=["DELETE"])
+@role_required("admin")
+def admin_delete_block(block_id):
+    try:
+        db.session.execute(sql_text("DELETE FROM blocks WHERE block_id = :id"), {"id": block_id})
+        db.session.commit()
+        return jsonify({"success": True})
+    except Exception as e:
+        db.session.rollback()
+        return json_error(str(e), 500, traceback.format_exc())
+
+
+@app.route("/api/admin/sub-center", methods=["POST"])
+@role_required("admin")
+def admin_create_sub_center():
+    try:
+        data = json_body()
+        name = (data.get("name") or "").strip()
+        block_id = safe_int(data.get("block_id"))
+        if not name or not block_id:
+            return json_error("name and block_id are required", 400)
+
+        columns = []
+        params = {"name": name, "block_id": block_id}
+
+        if column_exists("sub_centers", "sub_center_id") and not column_is_auto_increment("sub_centers", "sub_center_id"):
+            columns.append("sub_center_id")
+            params["sub_center_id"] = next_id("sub_centers", "sub_center_id")
+
+        columns += ["name", "block_id"]
+        cols_sql = ", ".join(columns)
+        vals_sql = ", ".join(f":{c}" for c in columns)
+        db.session.execute(sql_text(f"""
+            INSERT INTO sub_centers ({cols_sql})
+            VALUES ({vals_sql})
+        """), params)
+        db.session.commit()
+        return jsonify({"success": True})
+    except Exception as e:
+        db.session.rollback()
+        return json_error(str(e), 500, traceback.format_exc())
+
+
+@app.route("/api/admin/sub-center/<int:sub_center_id>", methods=["PUT"])
+@role_required("admin")
+def admin_update_sub_center(sub_center_id):
+    try:
+        data = json_body()
+        name = (data.get("name") or "").strip()
+        block_id = safe_int(data.get("block_id"))
+        if not name or not block_id:
+            return json_error("name and block_id are required", 400)
+
+        db.session.execute(sql_text("""
+            UPDATE sub_centers
+            SET name = :name,
+                block_id = :block_id
+            WHERE sub_center_id = :id
+        """), {"name": name, "block_id": block_id, "id": sub_center_id})
+        db.session.commit()
+        return jsonify({"success": True})
+    except Exception as e:
+        db.session.rollback()
+        return json_error(str(e), 500, traceback.format_exc())
+
+
+@app.route("/api/admin/sub-center/<int:sub_center_id>", methods=["DELETE"])
+@role_required("admin")
+def admin_delete_sub_center(sub_center_id):
+    try:
+        db.session.execute(sql_text("DELETE FROM sub_centers WHERE sub_center_id = :id"), {"id": sub_center_id})
+        db.session.commit()
+        return jsonify({"success": True})
+    except Exception as e:
+        db.session.rollback()
+        return json_error(str(e), 500, traceback.format_exc())
+
+
+@app.route("/api/admin/village", methods=["POST"])
+@role_required("admin")
+def admin_create_village():
+    try:
+        data = json_body()
+        lgd = safe_int(data.get("village_lgd_code"))
+        name = (data.get("name") or "").strip()
+        district_id = safe_int(data.get("district_id"))
+        block_id = safe_int(data.get("block_id"))
+        sub_center_id = safe_int(data.get("sub_center_id"))
+
+        has_sub_center = column_exists("villages", "sub_center_id")
+        if not lgd or not name or not district_id or not block_id or (has_sub_center and not sub_center_id):
+            return json_error("village_lgd_code, name, district_id, block_id, sub_center_id are required", 400)
+
+        existing = db.session.execute(sql_text("""
+            SELECT TOP 1 village_lgd_code
+            FROM villages
+            WHERE village_lgd_code = :lgd
+        """), {"lgd": lgd}).mappings().fetchone()
+        if existing:
+            return json_error("Village LGD code already exists. Use a unique LGD code.", 409)
+
+        columns = []
+        params = {
+            "lgd": lgd,
+            "name": name,
+            "district_id": district_id,
+            "block_id": block_id,
+            "sub_center_id": sub_center_id
+        }
+
+        if column_exists("villages", "village_id") and not column_is_auto_increment("villages", "village_id"):
+            columns.append("village_id")
+            params["village_id"] = next_id("villages", "village_id")
+
+        columns += ["village_lgd_code", "name", "district_id", "block_id"]
+        params["village_lgd_code"] = params.pop("lgd")
+        if has_sub_center:
+            columns.append("sub_center_id")
+        cols_sql = ", ".join(columns)
+        vals_sql = ", ".join(f":{c}" for c in columns)
+        db.session.execute(sql_text(f"""
+            INSERT INTO villages ({cols_sql})
+            VALUES ({vals_sql})
+        """), params)
+        db.session.commit()
+        return jsonify({"success": True})
+    except Exception as e:
+        db.session.rollback()
+        return json_error(str(e), 500, traceback.format_exc())
+
+
+@app.route("/api/admin/village/<int:village_lgd_code>", methods=["PUT"])
+@role_required("admin")
+def admin_update_village(village_lgd_code):
+    try:
+        data = json_body()
+        name = (data.get("name") or "").strip()
+        district_id = safe_int(data.get("district_id"))
+        block_id = safe_int(data.get("block_id"))
+        sub_center_id = safe_int(data.get("sub_center_id"))
+        has_sub_center = column_exists("villages", "sub_center_id")
+
+        if not name or not district_id or not block_id or (has_sub_center and not sub_center_id):
+            return json_error("name, district_id, block_id, sub_center_id are required", 400)
+
+        if has_sub_center:
+            db.session.execute(sql_text("""
+                UPDATE villages
+                SET name = :name,
+                    district_id = :district_id,
+                    block_id = :block_id,
+                    sub_center_id = :sub_center_id
+                WHERE village_lgd_code = :lgd
+            """), {
+                "name": name,
+                "district_id": district_id,
+                "block_id": block_id,
+                "sub_center_id": sub_center_id,
+                "lgd": village_lgd_code
+            })
+        else:
+            db.session.execute(sql_text("""
+                UPDATE villages
+                SET name = :name,
+                    district_id = :district_id,
+                    block_id = :block_id
+                WHERE village_lgd_code = :lgd
+            """), {
+                "name": name,
+                "district_id": district_id,
+                "block_id": block_id,
+                "lgd": village_lgd_code
+            })
+        db.session.commit()
+        return jsonify({"success": True})
+    except Exception as e:
+        db.session.rollback()
+        return json_error(str(e), 500, traceback.format_exc())
+
+
+@app.route("/api/admin/village/<int:village_lgd_code>", methods=["DELETE"])
+@role_required("admin")
+def admin_delete_village(village_lgd_code):
+    try:
+        db.session.execute(sql_text("DELETE FROM villages WHERE village_lgd_code = :lgd"), {"lgd": village_lgd_code})
+        db.session.commit()
+        return jsonify({"success": True})
+    except Exception as e:
+        db.session.rollback()
+        return json_error(str(e), 500, traceback.format_exc())
+
+
+@app.route("/api/admin/household-registry", methods=["POST"])
+@role_required("admin")
+def admin_create_household_registry():
+    try:
+        data = json_body()
+        code = (data.get("household_code") or data.get("name") or "").strip()
+        village_id = safe_int(data.get("village_id"))
+
+        if not code or not village_id:
+            return json_error("household_code and village_id are required", 400)
+
+        village = db.session.execute(
+            sql_text("SELECT village_id FROM villages WHERE village_id = :vid"),
+            {"vid": village_id},
+        ).mappings().fetchone()
+        if not village:
+            return json_error("Village not found", 400)
+
+        exists = db.session.execute(sql_text("""
+            SELECT TOP 1 registry_id
+            FROM household_registry
+            WHERE code_ci = LOWER(:code)
+        """), {"code": code}).mappings().fetchone()
+        if exists:
+            return json_error("Household ID already exists", 409)
+
+        db.session.execute(sql_text("""
+            INSERT INTO household_registry (household_code, village_id)
+            VALUES (:code, :vid)
+        """), {"code": code, "vid": village_id})
+        db.session.commit()
+        return jsonify({"success": True})
+    except Exception as e:
+        db.session.rollback()
+        return json_error(str(e), 500, traceback.format_exc())
+
+
+@app.route("/api/admin/locations/bulk/<level>", methods=["POST"])
+@role_required("admin")
+def admin_bulk_locations(level):
+    if not load_workbook:
+        return json_error("openpyxl is required for bulk upload. Please install it on the server.", 500)
+
+    level_map = {
+        "state": "states",
+        "states": "states",
+        "district": "districts",
+        "districts": "districts",
+        "block": "blocks",
+        "blocks": "blocks",
+        "subcenter": "subcenters",
+        "subcentre": "subcenters",
+        "subcenters": "subcenters",
+        "subcentres": "subcenters",
+        "village": "villages",
+        "villages": "villages",
+        "household": "households",
+        "households": "households",
+    }
+    level = level_map.get((level or "").strip().lower())
+    if not level:
+        return json_error("Invalid level", 400)
+    if level == "households" and not table_exists("household_registry"):
+        return json_error("household_registry table not found. Contact admin.", 500)
+
+    file = request.files.get("file")
+    if not file:
+        return json_error("file is required", 400)
+
+    try:
+        rows = read_excel_rows(file)
+    except Exception as e:
+        return json_error(f"Failed to read Excel: {str(e)}", 400)
+
+    if not rows:
+        return json_error("No data found in file", 400)
+
+    items, parse_errors = parse_bulk_rows(rows, level)
+    if not items and parse_errors:
+        return json_error("No valid rows found", 400, {"errors": parse_errors[:20]})
+
+    inserted = 0
+    skipped = 0
+    errors = []
+
+    def get_state_id(name: str):
+        row = db.session.execute(
+            sql_text("SELECT TOP 1 state_id FROM states WHERE LOWER(name) = LOWER(:n)"),
+            {"n": name},
+        ).mappings().fetchone()
+        if row:
+            return row["state_id"], False
+
+        columns = []
+        params = {}
+        if column_exists("states", "state_id") and not column_is_auto_increment("states", "state_id"):
+            columns.append("state_id")
+            params["state_id"] = next_id("states", "state_id")
+
+        columns.append("name")
+        params["name"] = name
+
+        if column_exists("states", "territory_type"):
+            columns.append("territory_type")
+            params["territory_type"] = "STATE"
+
+        cols_sql = ", ".join(columns)
+        vals_sql = ", ".join(f":{c}" for c in columns)
+        res = db.session.execute(sql_text(f"""
+            INSERT INTO states ({cols_sql})
+            VALUES ({vals_sql})
+        """), params)
+        new_id = get_last_inserted_id() or params.get("state_id")
+        return new_id, True
+
+    def get_district_id(state_id: int, name: str):
+        row = db.session.execute(
+            sql_text("SELECT TOP 1 district_id FROM districts WHERE LOWER(name) = LOWER(:n) AND state_id = :sid"),
+            {"n": name, "sid": state_id},
+        ).mappings().fetchone()
+        if row:
+            return row["district_id"], False
+
+        columns = []
+        params = {"name": name, "state_id": state_id}
+        if column_exists("districts", "district_id") and not column_is_auto_increment("districts", "district_id"):
+            columns.append("district_id")
+            params["district_id"] = next_id("districts", "district_id")
+
+        columns += ["name", "state_id"]
+        cols_sql = ", ".join(columns)
+        vals_sql = ", ".join(f":{c}" for c in columns)
+        res = db.session.execute(sql_text(f"""
+            INSERT INTO districts ({cols_sql})
+            VALUES ({vals_sql})
+        """), params)
+        new_id = get_last_inserted_id() or params.get("district_id")
+        return new_id, True
+
+    def get_block_id(district_id: int, name: str):
+        row = db.session.execute(
+            sql_text("SELECT TOP 1 block_id FROM blocks WHERE LOWER(name) = LOWER(:n) AND district_id = :did"),
+            {"n": name, "did": district_id},
+        ).mappings().fetchone()
+        if row:
+            return row["block_id"], False
+
+        columns = []
+        params = {"name": name, "district_id": district_id}
+        if column_exists("blocks", "block_id") and not column_is_auto_increment("blocks", "block_id"):
+            columns.append("block_id")
+            params["block_id"] = next_id("blocks", "block_id")
+
+        columns += ["name", "district_id"]
+        cols_sql = ", ".join(columns)
+        vals_sql = ", ".join(f":{c}" for c in columns)
+        res = db.session.execute(sql_text(f"""
+            INSERT INTO blocks ({cols_sql})
+            VALUES ({vals_sql})
+        """), params)
+        new_id = get_last_inserted_id() or params.get("block_id")
+        return new_id, True
+
+    def get_subcenter_id(block_id: int, name: str):
+        row = db.session.execute(
+            sql_text("SELECT TOP 1 sub_center_id FROM sub_centers WHERE LOWER(name) = LOWER(:n) AND block_id = :bid"),
+            {"n": name, "bid": block_id},
+        ).mappings().fetchone()
+        if row:
+            return row["sub_center_id"], False
+
+        columns = []
+        params = {"name": name, "block_id": block_id}
+        if column_exists("sub_centers", "sub_center_id") and not column_is_auto_increment("sub_centers", "sub_center_id"):
+            columns.append("sub_center_id")
+            params["sub_center_id"] = next_id("sub_centers", "sub_center_id")
+
+        columns += ["name", "block_id"]
+        cols_sql = ", ".join(columns)
+        vals_sql = ", ".join(f":{c}" for c in columns)
+        res = db.session.execute(sql_text(f"""
+            INSERT INTO sub_centers ({cols_sql})
+            VALUES ({vals_sql})
+        """), params)
+        new_id = get_last_inserted_id() or params.get("sub_center_id")
+        return new_id, True
+
+    def get_village_id(name: str, district_id: int, block_id: int, sub_center_id: int, lgd_code):
+        has_sub_center = column_exists("villages", "sub_center_id")
+        params = {"n": name, "did": district_id, "bid": block_id}
+        where = "LOWER(name) = LOWER(:n) AND district_id = :did AND block_id = :bid"
+        if has_sub_center:
+            where += " AND sub_center_id = :sid"
+            params["sid"] = sub_center_id
+
+        row = db.session.execute(
+            sql_text(f"SELECT TOP 1 village_id, village_lgd_code FROM villages WHERE {where}"),
+            params,
+        ).mappings().fetchone()
+        if row:
+            return row["village_id"], False
+
+        if lgd_code and column_exists("villages", "village_lgd_code"):
+            lgd_row = db.session.execute(
+                sql_text("SELECT TOP 1 village_id FROM villages WHERE village_lgd_code = :lgd"),
+                {"lgd": lgd_code},
+            ).mappings().fetchone()
+            if lgd_row:
+                return lgd_row["village_id"], False
+
+        if not lgd_code and column_exists("villages", "village_lgd_code"):
+            lgd_code = next_id("villages", "village_lgd_code")
+
+        columns = []
+        params = {"name": name, "district_id": district_id, "block_id": block_id}
+        if has_sub_center:
+            params["sub_center_id"] = sub_center_id
+
+        if column_exists("villages", "village_id") and not column_is_auto_increment("villages", "village_id"):
+            columns.append("village_id")
+            params["village_id"] = next_id("villages", "village_id")
+
+        if column_exists("villages", "village_lgd_code"):
+            columns.append("village_lgd_code")
+            params["village_lgd_code"] = lgd_code
+
+        columns += ["name", "district_id", "block_id"]
+        if has_sub_center:
+            columns.append("sub_center_id")
+
+        cols_sql = ", ".join(columns)
+        vals_sql = ", ".join(f":{c}" for c in columns)
+        res = db.session.execute(sql_text(f"""
+            INSERT INTO villages ({cols_sql})
+            VALUES ({vals_sql})
+        """), params)
+        new_id = get_last_inserted_id() or params.get("village_id")
+        return new_id, True
+
+    for item in items:
+        try:
+            with db.session.begin_nested():
+                state_id, created = get_state_id(item["state"])
+
+                if level == "states":
+                    if created:
+                        inserted += 1
+                    else:
+                        skipped += 1
+                    continue
+
+                district_id, created = get_district_id(state_id, item["district"])
+                if level == "districts":
+                    if created:
+                        inserted += 1
+                    else:
+                        skipped += 1
+                    continue
+
+                block_id, created = get_block_id(district_id, item["block"])
+                if level == "blocks":
+                    if created:
+                        inserted += 1
+                    else:
+                        skipped += 1
+                    continue
+
+                sub_center_id, created = get_subcenter_id(block_id, item["subcenter"])
+                if level == "subcenters":
+                    if created:
+                        inserted += 1
+                    else:
+                        skipped += 1
+                    continue
+
+                lgd_code = safe_int(item.get("lgd"))
+                village_id, created = get_village_id(
+                    item["village"], district_id, block_id, sub_center_id, lgd_code
+                )
+                if level == "villages":
+                    if created:
+                        inserted += 1
+                    else:
+                        skipped += 1
+                    continue
+
+                if level == "households":
+                    code = (item.get("household") or "").strip()
+                    if not code:
+                        errors.append(f"Row {item.get('_row')}: missing household")
+                        continue
+
+                    existing_household = db.session.execute(sql_text("""
+                        SELECT TOP 1 registry_id
+                        FROM household_registry
+                        WHERE code_ci = LOWER(:code)
+                    """), {"code": code}).mappings().fetchone()
+
+                    if existing_household:
+                        skipped += 1
+                    else:
+                        db.session.execute(sql_text("""
+                            INSERT INTO household_registry (household_code, village_id)
+                            VALUES (:code, :vid)
+                        """), {"code": code, "vid": village_id})
+                        inserted += 1
+        except Exception as e:
+            errors.append(f"Row {item.get('_row')}: {str(e)}")
+
+    db.session.commit()
+    if errors:
+        return jsonify({
+            "success": True,
+            "inserted": inserted,
+            "skipped": skipped,
+            "errors": errors[:20],
+            "parse_errors": parse_errors[:20]
+        }), 200
+
+    return jsonify({"success": True, "inserted": inserted, "skipped": skipped, "parse_errors": parse_errors[:20]})
+
+# ==========================================================
+# ADMIN APIs (WRITE) - QUESTIONS  ✅ FIXED
+# ==========================================================
+
+@app.route("/api/admin/question", methods=["POST"])
+@role_required("admin")
+def admin_create_question():
+    try:
+        data = json_body()
+        raw_trigger = data.get("trigger_value", None)
+        payload = normalize_question_payload(data)
+
+        if not payload["section_id"] or not payload["question_text"] or not payload["question_type"]:
+            return json_error("section_id, question_text, question_type are required", 400)
+
+        trigger_values = normalize_trigger_values(raw_trigger, payload.get("trigger_value"))
+        # Triggers only apply to child questions
+        if payload["parent_id"] is None:
+            trigger_values = [None]
+        if not trigger_values:
+            trigger_values = [None]
+
+        # Next order must be globally unique (questions.uk_question_order)
+        next_order = db.session.execute(sql_text("""
+            SELECT COALESCE(MAX(question_order), 0) + 1 AS next_order
+            FROM questions
+        """)).mappings().fetchone()["next_order"]
+
+        question_ids = []
+        orders = []
+        for idx, tval in enumerate(trigger_values):
+            qt_val = payload["question_text"]
+            if payload["parent_id"] is not None and tval:
+                qt_val = format_question_text_with_trigger(qt_val, tval)
+            order_val = next_order + idx
+            db.session.execute(sql_text("""
+                INSERT INTO questions
+                (question_section_id, question_text, question_type, answer_type, options, parent_id, trigger_value, question_order, is_mandatory)
+                VALUES
+                (:sid, :qt, :qtype, :atype, :opts, :pid, :tval, :ord, :mandatory)
+            """), {
+                "sid": payload["section_id"],
+                "qt": qt_val,
+                "qtype": payload["question_type"],
+                "atype": payload["answer_type"],
+                "opts": payload["options"],
+                "pid": payload["parent_id"],
+                "tval": tval,
+                "ord": order_val,
+                "mandatory": payload["is_mandatory"],
+            })
+            new_id = get_last_inserted_id()
+            question_ids.append(new_id)
+            orders.append(order_val)
+
+        db.session.commit()
+        return jsonify({
+            "success": True,
+            "question_id": question_ids[0],
+            "question_ids": question_ids,
+            "question_order": orders[0],
+            "question_orders": orders
+        })
+
+    except Exception as e:
+        db.session.rollback()
+        return json_error(str(e), 500, traceback.format_exc())
+
+@app.route("/api/admin/individual-question", methods=["POST"])
+@role_required("admin")
+def admin_create_individual_question():
+    try:
+        data = json_body()
+        raw_trigger = data.get("trigger_value", None)
+        payload = normalize_question_payload(data)
+
+        if not payload["section_id"] or not payload["question_text"] or not payload["question_type"]:
+            return json_error("section_id, question_text, question_type are required", 400)
+
+        trigger_values = normalize_trigger_values(raw_trigger, payload.get("trigger_value"))
+        if payload["parent_id"] is None:
+            trigger_values = [None]
+        if not trigger_values:
+            trigger_values = [None]
+
+        next_order = db.session.execute(sql_text("""
+            SELECT COALESCE(MAX(question_order), 0) + 1 AS next_order
+            FROM individual_questions
+        """)).mappings().fetchone()["next_order"]
+
+        question_ids = []
+        orders = []
+        for idx, tval in enumerate(trigger_values):
+            qt_val = payload["question_text"]
+            if payload["parent_id"] is not None and tval:
+                qt_val = format_question_text_with_trigger(qt_val, tval)
+            order_val = next_order + idx
+            db.session.execute(sql_text("""
+                INSERT INTO individual_questions
+                (question_section_id, question_text, question_type, answer_type, options, parent_id, trigger_value, question_order, is_mandatory)
+                VALUES
+                (:sid, :qt, :qtype, :atype, :opts, :pid, :tval, :ord, :mandatory)
+            """), {
+                "sid": payload["section_id"],
+                "qt": qt_val,
+                "qtype": payload["question_type"],
+                "atype": payload["answer_type"],
+                "opts": payload["options"],
+                "pid": payload["parent_id"],
+                "tval": tval,
+                "ord": order_val,
+                "mandatory": payload["is_mandatory"],
+            })
+            new_id = get_last_inserted_id()
+            question_ids.append(new_id)
+            orders.append(order_val)
+
+        db.session.commit()
+        return jsonify({
+            "success": True,
+            "question_id": question_ids[0],
+            "question_ids": question_ids,
+            "question_order": orders[0],
+            "question_orders": orders
+        })
+
+    except Exception as e:
+        db.session.rollback()
+        return json_error(str(e), 500, traceback.format_exc())
+
+
+@app.route("/api/admin/question/<int:question_id>", methods=["PUT"])
+@role_required("admin")
+def admin_update_question(question_id):
+    try:
+        data = json_body()
+        payload = normalize_question_payload(data)
+
+        if not payload["section_id"] or not payload["question_text"] or not payload["question_type"]:
+            return json_error("section_id, question_text, question_type are required", 400)
+
+        qt_val = payload["question_text"]
+        if payload["parent_id"] is not None and payload["trigger_value"]:
+            qt_val = format_question_text_with_trigger(qt_val, payload["trigger_value"])
+
+        db.session.execute(sql_text("""
+            UPDATE questions
+            SET question_section_id = :sid,
+                question_text = :qt,
+                question_type = :qtype,
+                answer_type = :atype,
+                options = :opts,
+                parent_id = :pid,
+                trigger_value = :tval,
+                is_mandatory = :mandatory
+            WHERE question_id = :id
+        """), {
+            "sid": payload["section_id"],
+            "qt": qt_val,
+            "qtype": payload["question_type"],
+            "atype": payload["answer_type"],
+            "opts": payload["options"],
+            "pid": payload["parent_id"],
+            "tval": payload["trigger_value"],
+            "mandatory": payload["is_mandatory"],
+            "id": question_id
+        })
+
+        db.session.commit()
+        return jsonify({"success": True})
+
+    except Exception as e:
+        db.session.rollback()
+        return json_error(str(e), 500, traceback.format_exc())
+
+@app.route("/api/admin/individual-question/<int:question_id>", methods=["PUT"])
+@role_required("admin")
+def admin_update_individual_question(question_id):
+    try:
+        data = json_body()
+        payload = normalize_question_payload(data)
+
+        if not payload["section_id"] or not payload["question_text"] or not payload["question_type"]:
+            return json_error("section_id, question_text, question_type are required", 400)
+
+        qt_val = payload["question_text"]
+        if payload["parent_id"] is not None and payload["trigger_value"]:
+            qt_val = format_question_text_with_trigger(qt_val, payload["trigger_value"])
+
+        db.session.execute(sql_text("""
+            UPDATE individual_questions
+            SET question_section_id = :sid,
+                question_text = :qt,
+                question_type = :qtype,
+                answer_type = :atype,
+                options = :opts,
+                parent_id = :pid,
+                trigger_value = :tval,
+                is_mandatory = :mandatory
+            WHERE question_id = :id
+        """), {
+            "sid": payload["section_id"],
+            "qt": qt_val,
+            "qtype": payload["question_type"],
+            "atype": payload["answer_type"],
+            "opts": payload["options"],
+            "pid": payload["parent_id"],
+            "tval": payload["trigger_value"],
+            "mandatory": payload["is_mandatory"],
+            "id": question_id
+        })
+
+        db.session.commit()
+        return jsonify({"success": True})
+
+    except Exception as e:
+        db.session.rollback()
+        return json_error(str(e), 500, traceback.format_exc())
+
+
+@app.route("/api/admin/question/<int:question_id>", methods=["DELETE"])
+@role_required("admin")
+def admin_delete_question(question_id):
+    try:
+        db.session.execute(sql_text("DELETE FROM questions WHERE question_id = :id"), {"id": question_id})
+        db.session.commit()
+        return jsonify({"success": True})
+    except Exception as e:
+        db.session.rollback()
+        return json_error(str(e), 500, traceback.format_exc())
+
+@app.route("/api/admin/individual-question/<int:question_id>", methods=["DELETE"])
+@role_required("admin")
+def admin_delete_individual_question(question_id):
+    try:
+        db.session.execute(sql_text("DELETE FROM individual_questions WHERE question_id = :id"), {"id": question_id})
+        db.session.commit()
+        return jsonify({"success": True})
+    except Exception as e:
+        db.session.rollback()
+        return json_error(str(e), 500, traceback.format_exc())
+
+
+# ==========================================================
+# QUESTION TREE (used by questionnaire_manager.html)
+# ==========================================================
+
+@app.route("/api/questions/tree/<int:section_id>")
+def get_questions_tree(section_id):
+    try:
+        rows = db.session.execute(sql_text("""
+            SELECT question_id, question_section_id, question_text, question_type,
+                   answer_type, options, parent_id, trigger_value, question_order
+            FROM questions
+            WHERE question_section_id = :sid
+            ORDER BY parent_id, question_order
+        """), {"sid": section_id}).mappings().all()
+
+        questions = [dict(r) for r in rows]
+
+        def build_tree(parent_id=None):
+            nodes = []
+            for q in questions:
+                if (parent_id is None and q.get("parent_id") is None) or (parent_id is not None and q.get("parent_id") == parent_id):
+                    node = {
+                        "question_id": q["question_id"],
+                        "question_text": q["question_text"],
+                        "question_type": q["question_type"],
+                        "answer_type": q["answer_type"],
+                        "options": q.get("options"),
+                        "parent_id": q.get("parent_id"),
+                        "trigger_value": q.get("trigger_value"),
+                        "children": build_tree(q["question_id"]),
+                    }
+                    nodes.append(node)
+            return nodes
+
+        return jsonify(build_tree())
+    except Exception as e:
+        return json_error(str(e), 500, traceback.format_exc())
+
+
+# ==========================================================
+# ADMIN USER/ADMIN MGMT
+# ==========================================================
+
+@app.route("/api/admin/user", methods=["POST"])
+@role_required("admin")
+def admin_create_user():
+    try:
+        data = json_body()
+        username = (data.get("username") or "").strip()
+        password = data.get("password") or ""
+
+        if not username or not password:
+            return json_error("username and password are required", 400)
+        if len(password) < 6:
+            return json_error("Password must be at least 6 characters", 400)
+
+        password_hash = generate_password_hash(password)
+        db.session.execute(
+            sql_text("INSERT INTO users (username, password_hash) VALUES (:u, :p)"),
+            {"u": username, "p": password_hash},
+        )
+        db.session.commit()
+        return jsonify({"success": True})
+    except Exception as e:
+        db.session.rollback()
+        return json_error(str(e), 500, traceback.format_exc())
+
+
+@app.route("/api/admin/user/<int:user_id>", methods=["DELETE"])
+@role_required("admin")
+def admin_delete_user(user_id):
+    try:
+        db.session.execute(sql_text("DELETE FROM users WHERE user_id=:id"), {"id": user_id})
+        db.session.commit()
+        return jsonify({"success": True})
+    except Exception as e:
+        db.session.rollback()
+        return json_error(str(e), 500, traceback.format_exc())
+
+
+@app.route("/api/admin/admin", methods=["POST"])
+@role_required("admin")
+def admin_create_admin():
+    try:
+        data = json_body()
+        username = (data.get("username") or "").strip()
+        password = data.get("password") or ""
+
+        if not username or not password:
+            return json_error("username and password are required", 400)
+        if len(password) < 6:
+            return json_error("Password must be at least 6 characters", 400)
+
+        password_hash = generate_password_hash(password)
+        # admins table requires both password and password_hash (password is NOT NULL)
+        db.session.execute(
+            sql_text("INSERT INTO admins (username, password, password_hash) VALUES (:u, :p_raw, :p_hash)"),
+            {"u": username, "p_raw": password_hash, "p_hash": password_hash},
+        )
+        db.session.commit()
+        return jsonify({"success": True})
+    except Exception as e:
+        db.session.rollback()
+        return json_error(str(e), 500, traceback.format_exc())
+
+
+@app.route("/api/admin/admin/<int:admin_id>", methods=["DELETE"])
+@role_required("admin")
+def admin_delete_admin(admin_id):
+    try:
+        db.session.execute(sql_text("DELETE FROM admins WHERE admin_id=:id"), {"id": admin_id})
+        db.session.commit()
+        return jsonify({"success": True})
+    except Exception as e:
+        db.session.rollback()
+        return json_error(str(e), 500, traceback.format_exc())
+
+
+# ==========================================================
+# BACKWARD-COMPAT API ALIASES (legacy admin.js support)
+# ==========================================================
+
+@app.route("/api/admin/create-user", methods=["POST"])
+@role_required("admin")
+def admin_create_user_legacy():
+    return admin_create_user()
+
+
+@app.route("/api/admin/create-admin", methods=["POST"])
+@role_required("admin")
+def admin_create_admin_legacy():
+    return admin_create_admin()
+
+
+@app.route("/api/admin/delete-user/<int:user_id>", methods=["DELETE"])
+@role_required("admin")
+def admin_delete_user_legacy(user_id):
+    return admin_delete_user(user_id)
+
+
+@app.route("/api/admin/delete-admin/<int:admin_id>", methods=["DELETE"])
+@role_required("admin")
+def admin_delete_admin_legacy(admin_id):
+    return admin_delete_admin(admin_id)
+
+
+@app.route("/api/admin/delete/questionnaire_sections/<int:item_id>", methods=["DELETE"])
+@role_required("admin")
+def admin_delete_questionnaire_sections_legacy(item_id):
+    return admin_delete_section(item_id)
+
+
+@app.route("/api/admin/delete/questionnaire_questions/<int:item_id>", methods=["DELETE"])
+@role_required("admin")
+def admin_delete_questionnaire_questions_legacy(item_id):
+    return admin_delete_question(item_id)
+
+
+@app.route("/api/admin/delete/<string:table>/<int:item_id>", methods=["DELETE"])
+@role_required("admin")
+def admin_delete_generic_legacy(table, item_id):
+    handlers = {
+        "states": lambda x: admin_delete_state(x),
+        "districts": lambda x: admin_delete_district(x),
+        "blocks": lambda x: admin_delete_block(x),
+        "villages": lambda x: admin_delete_village(x),
+    }
+    handler = handlers.get((table or "").strip().lower())
+    if not handler:
+        return json_error("Unsupported delete table", 400)
+    return handler(item_id)
+
+
+# ==========================================================
+# DB HEALTH
+# ==========================================================
+
+@app.route("/api/health-db")
+def health_db():
+    try:
+        counts = {}
+        for table in ["states", "districts", "blocks", "sub_centers", "villages", "households", "household_registry"]:
+            r = db.session.execute(sql_text(f"SELECT COUNT(*) as count FROM {table}")).mappings().fetchone()
+            counts[table] = int(r["count"]) if r and "count" in r else 0
+        return jsonify({"ok": True, "counts": counts})
+    except Exception as e:
+        return json_error(str(e), 500, traceback.format_exc())
+
+
+# ==========================================================
+# GEOGRAPHIC DATA ENDPOINTS (kept for compatibility)
+# ==========================================================
+
+@app.route("/api/admin/all-states")
+@role_required("admin")
+def admin_get_all_states():
+    try:
+        search = request.args.get("search", "").strip()
+        if search:
+            result = db.session.execute(
+                sql_text("SELECT * FROM states WHERE name LIKE :search ORDER BY name"),
+                {"search": f"%{search}%"},
+            ).mappings().all()
+        else:
+            result = db.session.execute(sql_text("SELECT * FROM states ORDER BY name")).mappings().all()
+        return jsonify([dict(r) for r in result])
+    except Exception as e:
+        return json_error(str(e), 500)
+
+
+@app.route("/api/admin/all-districts")
+@role_required("admin")
+def admin_get_all_districts():
+    try:
+        search = request.args.get("search", "").strip()
+        state_id = request.args.get("state_id", "").strip()
+
+        query = "SELECT d.*, s.name as state_name FROM districts d JOIN states s ON d.state_id = s.state_id WHERE 1=1"
+        params = {}
+
+        if state_id:
+            query += " AND d.state_id = :state_id"
+            params["state_id"] = int(state_id)
+
+        if search:
+            query += " AND d.name LIKE :search"
+            params["search"] = f"%{search}%"
+
+        query += " ORDER BY s.name, d.name"
+        result = db.session.execute(sql_text(query), params).mappings().all()
+        return jsonify([dict(r) for r in result])
+    except Exception as e:
+        return json_error(str(e), 500)
+
+
+@app.route("/api/admin/all-blocks")
+@role_required("admin")
+def admin_get_all_blocks():
+    try:
+        search = request.args.get("search", "").strip()
+        district_id = request.args.get("district_id", "").strip()
+
+        query = "SELECT b.*, d.name as district_name, s.name as state_name FROM blocks b JOIN districts d ON b.district_id = d.district_id JOIN states s ON d.state_id = s.state_id WHERE 1=1"
+        params = {}
+
+        if district_id:
+            query += " AND b.district_id = :district_id"
+            params["district_id"] = int(district_id)
+
+        if search:
+            query += " AND b.name LIKE :search"
+            params["search"] = f"%{search}%"
+
+        query += " ORDER BY s.name, d.name, b.name"
+        result = db.session.execute(sql_text(query), params).mappings().all()
+        return jsonify([dict(r) for r in result])
+    except Exception as e:
+        return json_error(str(e), 500)
+
+
+@app.route("/api/admin/all-sub-centers")
+@role_required("admin")
+def admin_get_all_sub_centers():
+    try:
+        search = request.args.get("search", "").strip()
+        block_id = request.args.get("block_id", "").strip()
+
+        query = """
+            SELECT sc.*, b.name as block_name, d.name as district_name, s.name as state_name
+            FROM sub_centers sc
+            LEFT JOIN blocks b ON sc.block_id = b.block_id
+            LEFT JOIN districts d ON b.district_id = d.district_id
+            LEFT JOIN states s ON d.state_id = s.state_id
+            WHERE 1=1
+        """
+        params = {}
+
+        if block_id:
+            query += " AND sc.block_id = :block_id"
+            params["block_id"] = int(block_id)
+
+        if search:
+            query += " AND sc.name LIKE :search"
+            params["search"] = f"%{search}%"
+
+        query += " ORDER BY s.name, d.name, b.name, sc.name"
+        result = db.session.execute(sql_text(query), params).mappings().all()
+        return jsonify([dict(r) for r in result])
+    except Exception as e:
+        return json_error(str(e), 500)
+
+
+@app.route("/api/admin/all-villages")
+@role_required("admin")
+def admin_get_all_villages():
+    try:
+        search = request.args.get("search", "").strip()
+        district_id = request.args.get("district_id", "").strip()
+        sub_center_id = request.args.get("sub_center_id", "").strip()
+
+        query = """SELECT v.village_id, v.village_lgd_code, v.name, v.district_id, v.block_id, v.sub_center_id,
+                   sc.name as sub_center_name, b.name as block_name,
+                   d.name as district_name, s.name as state_name
+            FROM villages v
+            LEFT JOIN sub_centers sc ON v.sub_center_id = sc.sub_center_id
+            LEFT JOIN blocks b ON v.block_id = b.block_id
+            LEFT JOIN districts d ON v.district_id = d.district_id
+            LEFT JOIN states s ON d.state_id = s.state_id
+            WHERE 1=1"""
+        params = {}
+
+        if sub_center_id:
+            query += " AND v.sub_center_id = :sub_center_id"
+            params["sub_center_id"] = int(sub_center_id)
+
+        if district_id:
+            query += " AND v.district_id = :district_id"
+            params["district_id"] = int(district_id)
+
+        if search:
+            query += " AND v.name LIKE :search"
+            params["search"] = f"%{search}%"
+
+        query += " ORDER BY s.name, d.name, b.name, v.name"
+        result = db.session.execute(sql_text(query), params).mappings().all()
+        return jsonify([dict(r) for r in result])
+    except Exception as e:
+        return json_error(str(e), 500)
+
+
+# ==========================================================
+# LOCATIONS API (for survey flow - geographic hierarchy)
+# ==========================================================
+
+@app.route("/api/locations/<location_type>/<int:parent_id>", methods=["GET"])
+def get_locations(location_type, parent_id):
+    """
+    Return geographic locations based on type and parent ID.
+    Supports: states, districts, blocks, subcentres, villages, households
+    """
+    try:
+        if location_type == "states":
+            result = db.session.execute(
+                sql_text("SELECT state_id as id, state_name as name FROM states ORDER BY state_name")
+            ).mappings().all()
+        
+        elif location_type == "districts":
+            result = db.session.execute(
+                sql_text("SELECT district_id as id, district_name as name FROM districts WHERE state_id = :sid ORDER BY district_name"),
+                {"sid": parent_id}
+            ).mappings().all()
+        
+        elif location_type == "blocks":
+            result = db.session.execute(
+                sql_text("SELECT block_id as id, block_name as name FROM blocks WHERE district_id = :did ORDER BY block_name"),
+                {"did": parent_id}
+            ).mappings().all()
+        
+        elif location_type == "subcentres":
+            result = db.session.execute(
+                sql_text("SELECT sub_center_id as id, sub_center_name as name FROM sub_centers WHERE block_id = :bid ORDER BY sub_center_name"),
+                {"bid": parent_id}
+            ).mappings().all()
+        
+        elif location_type == "villages":
+            result = db.session.execute(
+                sql_text("SELECT village_id as id, village_name as name FROM villages WHERE sub_center_id = :sid ORDER BY village_name"),
+                {"sid": parent_id}
+            ).mappings().all()
+        
+        elif location_type == "households":
+            result = db.session.execute(
+                sql_text("SELECT household_id as id, household_name as name FROM households WHERE village_id = :vid ORDER BY household_name"),
+                {"vid": parent_id}
+            ).mappings().all()
+        
+        else:
+            return json_error(f"Unknown location type: {location_type}", 400)
+        
+        return jsonify([{"id": r["id"], "name": r["name"]} for r in result])
+    
+    except Exception as e:
+        return json_error(str(e), 500)
+
+
+@app.route("/api/initialize-survey", methods=["POST"])
+def initialize_survey():
+    """
+    Initialize a survey attempt for a person/household.
+    Checks if person exists, creates attempt, etc.
+    """
+    try:
+        data = json_body()
+        aadhar = (data.get("aadhar") or "").strip()
+        household_id = safe_int(data.get("household_id"))
+        age = safe_int(data.get("age"))
+        
+        if not aadhar or len(aadhar) != 12:
+            return json_error("Valid Aadhaar (12 digits) required", 400)
+        if not household_id or age is None or age < 0:
+            return json_error("Valid household_id and age required", 400)
+        
+        aadhar_hash = hash_aadhar(aadhar)
+        aadhar_enc = encrypt_aadhar(aadhar)
+
+        # Check if person exists
+        person = db.session.execute(
+            sql_text("SELECT person_id FROM persons WHERE aadhar_hash = :ah AND household_id = :hid"),
+            {"ah": aadhar_hash, "hid": household_id}
+        ).mappings().fetchone()
+        
+        person_id = None
+        if person:
+            person_id = person["person_id"]
+            # Check if already completed
+            completed = db.session.execute(
+                sql_text("SELECT survey_attempt_id FROM survey_attempts WHERE person_id = :pid AND status = 'completed'"),
+                {"pid": person_id}
+            ).mappings().fetchone()
+            
+            if completed:
+                return jsonify({
+                    "status": "fully_completed",
+                    "message": "This person's survey is already completed."
+                }), 200
+        else:
+            # Create new person
+            db.session.execute(
+                sql_text("""
+                    INSERT INTO persons (aadhar, aadhar_hash, household_id, age)
+                    VALUES (:aadhar, :ah, :hid, :age)
+                """),
+                {"aadhar": aadhar_enc, "ah": aadhar_hash, "hid": household_id, "age": age}
+            )
+            db.session.commit()
+            
+            # Get the newly created person
+            person = db.session.execute(
+                sql_text("SELECT person_id FROM persons WHERE aadhar_hash = :ah AND household_id = :hid"),
+                {"ah": aadhar_hash, "hid": household_id}
+            ).mappings().fetchone()
+            person_id = person["person_id"]
+        
+        # Create survey attempt
+        db.session.execute(
+            sql_text("""
+                INSERT INTO survey_attempts (person_id, status, created_at)
+                VALUES (:pid, 'in_progress', GETDATE())
+            """),
+            {"pid": person_id}
+        )
+        db.session.commit()
+        
+        # Get the attempt ID
+        attempt = db.session.execute(
+            sql_text("SELECT TOP 1 survey_attempt_id FROM survey_attempts WHERE person_id = :pid ORDER BY created_at DESC"),
+            {"pid": person_id}
+        ).mappings().fetchone()
+        
+        return jsonify({
+            "status": "ready",
+            "person_id": person_id,
+            "attempt_id": attempt["survey_attempt_id"],
+            "responses": {}
+        }), 200
+        
+    except Exception as e:
+        db.session.rollback()
+        return json_error(str(e), 500)
+
+
+# ==========================================================
+# GLOBAL ERROR HANDLERS
+# ==========================================================
+
+@app.errorhandler(404)
+def not_found(e):
+    if request.path.startswith("/api/"):
+        return jsonify({"success": False, "error": "Not found"}), 404
+    return render_template("home.html"), 404
+
+
+@app.errorhandler(405)
+def method_not_allowed(e):
+    return jsonify({"success": False, "error": "Method not allowed"}), 405
+
+
+@app.errorhandler(500)
+def internal_error(e):
+    db.session.rollback()
+    app.logger.error("Unhandled 500 error", exc_info=True)
+    if request.path.startswith("/api/"):
+        return jsonify({"success": False, "error": "An internal error occurred"}), 500
+    return render_template("home.html"), 500
+
+
+# ==========================================================
+# RUN
+# ==========================================================
+
+if __name__ == "__main__":
+    # Never enable debug=True in production — it exposes the interactive
+    # Werkzeug debugger which allows arbitrary code execution on the server.
+    # Set FLASK_ENV=development (not FLASK_DEBUG=1) to enable debug locally.
+    _debug = os.getenv("FLASK_ENV", "production") == "development"
+    app.run(debug=_debug)

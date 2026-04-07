@@ -124,6 +124,7 @@
         }
 
         input[type="text"],
+        input[type="password"],
         select {
             padding: 12px;
             border: 2px solid #e0e0e0;
@@ -570,6 +571,26 @@
                 <button type="submit" class="btn btn-primary" id="submitBtn">
                     Create Household & Mark Location
                 </button>
+                <div style="margin-top:12px;">
+                    <label style="display:inline-flex;align-items:center;gap:8px;cursor:pointer;font-weight:600;color:#4b5563;">
+                        <input type="checkbox" id="reopenCompleted">
+                        Re-open completed submission for editing
+                    </label>
+                    <div class="helper-text">Use this only when you need to edit a household that was already finally submitted.</div>
+                    <div id="adminAuthBox" style="display:none;margin-top:10px;padding:12px;border:1px solid #e5e7eb;border-radius:10px;background:#f9fafb;">
+                        <div class="helper-text" style="margin-bottom:8px;">Admin approval required for Edit Form access.</div>
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label>Admin Username <span class="required">*</span></label>
+                                <input type="text" id="adminUsername" autocomplete="off" placeholder="Enter admin username">
+                            </div>
+                            <div class="form-group">
+                                <label>Admin Password <span class="required">*</span></label>
+                                <input type="password" id="adminPassword" autocomplete="off" placeholder="Enter admin password">
+                            </div>
+                        </div>
+                    </div>
+                </div>
             </form>
         </div>
     </div>
@@ -617,6 +638,7 @@
                 const payload = {
                     householdCode: householdCodeInput.value || '',
                     householdRegistryId: householdRegistryIdInput.value || '',
+                    reopenCompleted: document.getElementById('reopenCompleted')?.checked || false,
                     stateId: stateSelect.value || '',
                     districtId: districtSelect.value || '',
                     blockId: blockSelect.value || '',
@@ -662,9 +684,13 @@
         const villageSelect = document.getElementById('village');
         const householdCodeInput = document.getElementById('householdCode');
         const householdRegistryIdInput = document.getElementById('householdRegistryId');
+        const reopenCompletedInput = document.getElementById('reopenCompleted');
         const householdSuggestions = document.getElementById('householdSuggestions');
         const householdHelper = document.getElementById('householdHelper');
         const submitBtn = document.getElementById('submitBtn');
+        const adminAuthBox = document.getElementById('adminAuthBox');
+        const adminUsernameInput = document.getElementById('adminUsername');
+        const adminPasswordInput = document.getElementById('adminPassword');
 
         // Load states on page load
         loadStates();
@@ -892,6 +918,12 @@
 
             householdCodeInput.value = draft.householdCode || '';
             householdRegistryIdInput.value = draft.householdRegistryId || '';
+            if (reopenCompletedInput) {
+                reopenCompletedInput.checked = !!draft.reopenCompleted;
+                if (adminAuthBox) {
+                    adminAuthBox.style.display = reopenCompletedInput.checked ? 'block' : 'none';
+                }
+            }
             if (draft.stateId) {
                 stateSelect.value = draft.stateId;
                 selectedState = draft.stateId;
@@ -973,6 +1005,20 @@
             saveDraft();
         });
 
+        if (reopenCompletedInput) {
+            reopenCompletedInput.addEventListener('change', () => {
+                const enabled = !!reopenCompletedInput.checked;
+                if (adminAuthBox) {
+                    adminAuthBox.style.display = enabled ? 'block' : 'none';
+                }
+                if (!enabled) {
+                    if (adminUsernameInput) adminUsernameInput.value = '';
+                    if (adminPasswordInput) adminPasswordInput.value = '';
+                }
+                saveDraft();
+            });
+        }
+
         document.getElementById('householdForm').addEventListener('submit', async function(e) {
             e.preventDefault();
             
@@ -983,6 +1029,9 @@
             const blockId = blockSelect.value;
             const subCenterId = subCenterSelect.value;
             const villageId = villageSelect.value;
+            const reopenCompleted = !!reopenCompletedInput?.checked;
+            const adminUsername = (adminUsernameInput?.value || '').trim();
+            const adminPassword = adminPasswordInput?.value || '';
 
             if (!householdCode || !stateId || !districtId || !villageId || !subCenterId) {
                 showMessage('Please fill in all required fields', 'error');
@@ -991,6 +1040,11 @@
 
             if (!householdRegistryId) {
                 showMessage('Please select a household ID from the dropdown', 'error');
+                return;
+            }
+
+            if (reopenCompleted && (!adminUsername || !adminPassword)) {
+                showMessage('Admin username and password are required to edit a completed form.', 'error');
                 return;
             }
 
@@ -1007,6 +1061,9 @@
                     body: JSON.stringify({
                         household_name: householdCode,
                         household_registry_id: householdRegistryId,
+                        reopen_completed: reopenCompleted,
+                        admin_username: adminUsername,
+                        admin_password: adminPassword,
                         state_id: stateId,
                         district_id: districtId,
                         block_id: blockId,
@@ -1029,12 +1086,14 @@
                         submitBtn.innerHTML = 'Create Household & Mark Location';
                     } else {
                         // New household or no location - go to mark location
-                        const msg = result.resumed
+                        const msg = result.reopened
+                            ? 'Completed household re-opened for editing. Redirecting...'
+                            : result.resumed
                             ? 'Household resumed! Redirecting to mark location...'
                             : 'Household created! Please mark the location on the map...';
                         showMessage(msg, 'success');
                         setTimeout(() => {
-                            window.location.href = '/mark-location';
+                            window.location.href = result.reopened ? '/survey' : '/mark-location';
                         }, 1500);
                     }
                 } else {

@@ -133,6 +133,29 @@
             gap: 10px;
             justify-content: center;
             margin-top: 20px;
+            flex-wrap: wrap;
+        }
+
+        .manual-input-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+            gap: 12px;
+            margin-top: 12px;
+        }
+
+        .manual-input-grid input {
+            width: 100%;
+            border: 1px solid #d1d5db;
+            border-radius: 8px;
+            padding: 10px 12px;
+            font-size: 14px;
+        }
+
+        .manual-actions {
+            margin-top: 12px;
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
         }
         
         .status-badge {
@@ -232,8 +255,10 @@
             <ol>
                 <li>Wait for your current location to load on the map</li>
                 <li>Drag the red marker to the exact household location</li>
+                <li>If GPS fails, click on map or enter Latitude/Longitude manually</li>
                 <li>Zoom in using + button for better accuracy</li>
                 <li>Click "Confirm Location" when the pin is at the correct spot</li>
+                <li>If needed, click "Skip For Now" and continue the survey</li>
             </ol>
         </div>
         
@@ -259,6 +284,24 @@
                     <div class="info-value" id="accuracyValue">--</div>
                 </div>
             </div>
+
+            <h3 style="margin-top: 12px;">Manual Coordinates (Optional)</h3>
+            <p style="color: #666; font-size: 13px; margin-bottom: 8px;">Enter coordinates if GPS is unavailable, then place marker.</p>
+            <div class="manual-input-grid">
+                <div>
+                    <label for="manualLat" style="display: block; font-size: 12px; color: #6b7280; font-weight: 600; margin-bottom: 5px;">Latitude</label>
+                    <input id="manualLat" type="number" step="any" placeholder="e.g. 23.0225" />
+                </div>
+                <div>
+                    <label for="manualLng" style="display: block; font-size: 12px; color: #6b7280; font-weight: 600; margin-bottom: 5px;">Longitude</label>
+                    <input id="manualLng" type="number" step="any" placeholder="e.g. 72.5714" />
+                </div>
+            </div>
+            <div class="manual-actions">
+                <button class="btn btn-secondary" type="button" onclick="setManualCoordinates()">
+                    📌 Set Marker Using Coordinates
+                </button>
+            </div>
         </div>
         
         <div id="map"></div>
@@ -270,6 +313,9 @@
             <button class="btn btn-primary" id="confirmBtn" onclick="confirmLocation()" disabled>
                 ✓ Confirm Location & Continue
             </button>
+            <button class="btn btn-secondary" type="button" onclick="skipLocationForNow()">
+                Skip For Now
+            </button>
         </div>
     </div>
     
@@ -280,6 +326,7 @@
         let currentLat = null;
         let currentLng = null;
         let currentAccuracy = null;
+        let hasChosenLocation = false;
         
         // Initialize map
         function initMap() {
@@ -320,6 +367,16 @@
             marker.on('dragend', function(e) {
                 const pos = marker.getLatLng();
                 updateCoordinates(pos.lat, pos.lng, currentAccuracy);
+                document.getElementById('gpsStatus').innerHTML =
+                    '<span class="status-badge status-active">✓ Manual Pin</span>';
+            });
+
+            map.on('click', function(e) {
+                const { lat, lng } = e.latlng;
+                marker.setLatLng([lat, lng]);
+                updateCoordinates(lat, lng, null);
+                document.getElementById('gpsStatus').innerHTML =
+                    '<span class="status-badge status-active">✓ Manual Pin</span>';
             });
             
             // Get current location
@@ -346,8 +403,7 @@
                         
                         document.getElementById('gpsStatus').innerHTML = 
                             '<span class="status-badge status-active">✓ Active</span>';
-                        
-                        document.getElementById('confirmBtn').disabled = false;
+                        setConfirmEnabled(true);
                         
                         // Add accuracy circle
                         L.circle([currentLat, currentLng], {
@@ -363,7 +419,7 @@
                         console.error('Location error:', error);
                         document.getElementById('gpsStatus').innerHTML = 
                             '<span class="status-badge status-inactive">⚠️ Failed</span>';
-                        showMessage('GPS Error: ' + error.message + '. Please enable location and try again.', 'error');
+                        showMessage('GPS Error: ' + error.message + '. You can still drag the marker, click the map, enter coordinates manually, or skip for now.', 'error');
                     },
                     {
                         enableHighAccuracy: true,
@@ -382,15 +438,61 @@
             currentLat = lat;
             currentLng = lng;
             currentAccuracy = acc;
+            hasChosenLocation = true;
+            setConfirmEnabled(true);
             
             document.getElementById('latValue').textContent = lat.toFixed(6);
             document.getElementById('lngValue').textContent = lng.toFixed(6);
             document.getElementById('accuracyValue').textContent = acc ? acc.toFixed(1) + 'm' : '--';
+
+            const manualLatEl = document.getElementById('manualLat');
+            const manualLngEl = document.getElementById('manualLng');
+            if (manualLatEl) manualLatEl.value = lat.toFixed(6);
+            if (manualLngEl) manualLngEl.value = lng.toFixed(6);
+        }
+
+        function setConfirmEnabled(enabled) {
+            const confirmBtn = document.getElementById('confirmBtn');
+            if (!confirmBtn) return;
+            confirmBtn.disabled = !enabled;
+        }
+
+        function setManualCoordinates() {
+            const latRaw = document.getElementById('manualLat').value;
+            const lngRaw = document.getElementById('manualLng').value;
+            const lat = parseFloat(latRaw);
+            const lng = parseFloat(lngRaw);
+
+            if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+                showMessage('Please enter valid numeric latitude and longitude.', 'error');
+                return;
+            }
+            if (lat < -90 || lat > 90) {
+                showMessage('Latitude must be between -90 and 90.', 'error');
+                return;
+            }
+            if (lng < -180 || lng > 180) {
+                showMessage('Longitude must be between -180 and 180.', 'error');
+                return;
+            }
+
+            marker.setLatLng([lat, lng]);
+            map.setView([lat, lng], 18);
+            updateCoordinates(lat, lng, null);
+            document.getElementById('gpsStatus').innerHTML =
+                '<span class="status-badge status-active">✓ Manual Entry</span>';
+            showMessage('Marker updated using manual coordinates.', 'success');
+        }
+
+        function skipLocationForNow() {
+            const ok = confirm('Location can be added later. Do you want to continue to survey now?');
+            if (!ok) return;
+            window.location.href = '/survey';
         }
         
         async function confirmLocation() {
-            if (!currentLat || !currentLng) {
-                showMessage('Please wait for GPS location or drag the marker', 'error');
+            if (!hasChosenLocation || currentLat === null || currentLng === null) {
+                showMessage('Choose location by GPS, map click, drag, or manual coordinates. You can also skip for now.', 'error');
                 return;
             }
             

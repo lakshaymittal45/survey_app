@@ -202,6 +202,7 @@ CREATE TABLE IF NOT EXISTS questionnaire_sections (
   section_id INT AUTO_INCREMENT NOT NULL,
   section_order INT NOT NULL,
   section_title VARCHAR(255) NOT NULL,
+  show_on_user_end TINYINT(1) NOT NULL DEFAULT 1,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (section_id),
@@ -217,6 +218,7 @@ CREATE TABLE IF NOT EXISTS questions (
   question_text TEXT NOT NULL,
   question_type VARCHAR(50) NOT NULL,
   answer_type VARCHAR(20) NOT NULL,
+  is_mandatory TINYINT(1) NULL,
   options TEXT NULL,
   parent_id INT NULL,
   trigger_value VARCHAR(255) NULL,
@@ -243,6 +245,7 @@ CREATE TABLE IF NOT EXISTS individual_questionnaire_sections (
   section_id INT AUTO_INCREMENT NOT NULL,
   section_order INT NOT NULL,
   section_title VARCHAR(255) NOT NULL,
+  show_on_user_end TINYINT(1) NOT NULL DEFAULT 1,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (section_id),
@@ -258,6 +261,7 @@ CREATE TABLE IF NOT EXISTS individual_questions (
   question_text TEXT NOT NULL,
   question_type VARCHAR(50) NOT NULL,
   answer_type VARCHAR(20) NOT NULL,
+  is_mandatory TINYINT(1) NULL,
   options TEXT NULL,
   parent_id INT NULL,
   trigger_value VARCHAR(255) NULL,
@@ -381,6 +385,69 @@ CREATE TABLE IF NOT EXISTS survey_attempts (
     FOREIGN KEY (person_id) REFERENCES persons(person_id)
     ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+-- ==========================================================
+-- COMPATIBILITY MIGRATIONS (safe for existing DBs)
+-- ==========================================================
+SET @sql = IF(
+  EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_schema = DATABASE()
+      AND table_name = 'questions'
+      AND column_name = 'is_mandatory'
+  ),
+  'SELECT ''questions.is_mandatory already exists'' AS msg',
+  'ALTER TABLE questions ADD COLUMN is_mandatory TINYINT(1) NULL'
+);
+PREPARE stmt FROM @sql;
+EXECUTE stmt;
+DEALLOCATE PREPARE stmt;
+
+SET @sql = IF(
+  EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_schema = DATABASE()
+      AND table_name = 'questionnaire_sections'
+      AND column_name = 'show_on_user_end'
+  ),
+  'SELECT ''questionnaire_sections.show_on_user_end already exists'' AS msg',
+  'ALTER TABLE questionnaire_sections ADD COLUMN show_on_user_end TINYINT(1) NOT NULL DEFAULT 1'
+);
+PREPARE stmt FROM @sql;
+EXECUTE stmt;
+DEALLOCATE PREPARE stmt;
+
+SET @sql = IF(
+  EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_schema = DATABASE()
+      AND table_name = 'individual_questionnaire_sections'
+      AND column_name = 'show_on_user_end'
+  ),
+  'SELECT ''individual_questionnaire_sections.show_on_user_end already exists'' AS msg',
+  'ALTER TABLE individual_questionnaire_sections ADD COLUMN show_on_user_end TINYINT(1) NOT NULL DEFAULT 1'
+);
+PREPARE stmt FROM @sql;
+EXECUTE stmt;
+DEALLOCATE PREPARE stmt;
+
+SET @sql = IF(
+  EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_schema = DATABASE()
+      AND table_name = 'individual_questions'
+      AND column_name = 'is_mandatory'
+  ),
+  'SELECT ''individual_questions.is_mandatory already exists'' AS msg',
+  'ALTER TABLE individual_questions ADD COLUMN is_mandatory TINYINT(1) NULL'
+);
+PREPARE stmt FROM @sql;
+EXECUTE stmt;
+DEALLOCATE PREPARE stmt;
 
 -- ==========================================================
 -- TRIGGERS (UPPERCASE NORMALIZATION)
