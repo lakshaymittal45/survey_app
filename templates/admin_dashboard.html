@@ -2227,6 +2227,15 @@
         return String(str).replace(/\\/g, "\\\\").replace(/'/g, "\\'");
       }
 
+      function formatDurationHMS(totalSeconds) {
+        const secs = Math.max(0, Math.floor(Number(totalSeconds) || 0));
+        const hh = Math.floor(secs / 3600);
+        const mm = Math.floor((secs % 3600) / 60);
+        const ss = secs % 60;
+        const pad = (n) => String(n).padStart(2, "0");
+        return `${pad(hh)}:${pad(mm)}:${pad(ss)}`;
+      }
+
       function showInlineMessage(id, msg, type) {
         const el = document.getElementById(id);
         if (!el) return;
@@ -5300,11 +5309,34 @@
           );
           const result = await response.json();
           const payload = result.responses || {};
+          const sectionTimes = Array.isArray(result.section_times)
+            ? result.section_times
+            : [];
           const member = payload.member || {};
           const tableHtml = renderResponsesTable(
             "Individual Questionnaire Responses",
             payload.responses,
           );
+
+          const rows = [
+            {
+              Section: "Member",
+              Key: "name",
+              Value: [member.first_name, member.middle_name, member.surname]
+                .filter(Boolean)
+                .join(" "),
+            },
+            ...objectToRows(member).map((r) => ({
+              Section: "Member",
+              Key: r.key,
+              Value: r.value,
+            })),
+            ...objectToRows(payload.responses || {}).map((r) => ({
+              Section: "Responses",
+              Key: r.key,
+              Value: r.value,
+            })),
+          ];
 
           const html = `
           <div class="form-container">
@@ -5331,74 +5363,83 @@
             </table>
           </div>
           ${tableHtml}
+          ${sectionTimes.length > 0 ? `
+          <div class="form-container">
+            <h3 style="margin-top:0;">Individual Questionnaire - Section Wise Time</h3>
+            <table class="data-table">
+              <tr><th>Section</th><th>Time (HH:MM:SS)</th></tr>
+              ${sectionTimes
+                .map((t) => {
+                  const sectionName =
+                    t.section_title || "Section " + String(t.section_id || "");
+                  const seconds = Number(t.seconds || 0);
+                  return `<tr>
+                    <td>${escapeAttr(sectionName)}</td>
+                    <td>${escapeAttr(formatDurationHMS(seconds))}</td>
+                  </tr>`;
+                })
+                .join("")}
+            </table>
+          </div>
+          ` : `
+          <div class="form-container">
+            <h3 style="margin-top:0;">Individual Questionnaire - Section Wise Time</h3>
+            <div class="empty-state">No section-wise timing recorded for this individual response.</div>
+          </div>
+          `}
           <div class="form-container" style="display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
+            <button class="btn btn-secondary" id="inlineBackBtn">Back</button>
             <button class="btn btn-primary" onclick="window.print()">Download PDF</button>
-            <button class="btn btn-secondary" id="exportCsvBtn">Export Excel (CSV)</button>
+            <button class="btn btn-secondary" id="inlineExportCsvBtn">Export Excel (CSV)</button>
           </div>
         `;
 
-          const w = window.open("", "_blank");
-          w.document.write(`
-          <html>
-          <head>
-            <title>Individual Questionnaire</title>
-            <style>
-              body { font-family: Arial, sans-serif; color: #333; padding: 20px; }
-              table { border-collapse: collapse; width: 100%; margin-bottom: 16px; }
-              th, td { border: 1px solid #ddd; padding: 8px; text-align: left; font-size: 12px; }
-              th { background: #f2f2f2; }
-              h3 { margin: 16px 0 8px; }
-              .btn { padding: 8px 12px; border-radius: 4px; border: 1px solid #ddd; cursor: pointer; margin-right: 8px; }
-              .btn-primary { background: #667eea; color: #fff; border: none; }
-              .btn-secondary { background: #f0f0f0; color: #333; border: 1px solid #ddd; }
-            </style>
-          </head>
-          <body>
-            ${html}
-            <script>
-              const rows = ${JSON.stringify([
-                {
-                  Section: "Member",
-                  Key: "name",
-                  Value: [member.first_name, member.middle_name, member.surname]
-                    .filter(Boolean)
-                    .join(" "),
-                },
-                ...objectToRows(member).map((r) => ({
-                  Section: "Member",
-                  Key: r.key,
-                  Value: r.value,
-                })),
-                ...objectToRows(payload.responses || {}).map((r) => ({
-                  Section: "Responses",
-                  Key: r.key,
-                  Value: r.value,
-                })),
-              ])};
-              function buildCsv(rows, headers) {
-                const safe = (v) => '"' + String(v ?? '').replace(/"/g, '""') + '"';
-                const headerLine = headers.map(safe).join(',');
-                const dataLines = rows.map(r => headers.map(h => safe(r[h])).join(','));
-                return [headerLine, ...dataLines].join('\\n');
-              }
-              function downloadCsv(filename, csvText) {
-                const blob = new Blob([csvText], { type: 'text/csv;charset=utf-8;' });
-                const link = document.createElement('a');
-                link.href = URL.createObjectURL(blob);
-                link.download = filename;
-                document.body.appendChild(link);
-                link.click();
-                document.body.removeChild(link);
-              }
-              document.getElementById('exportCsvBtn').addEventListener('click', () => {
-                const csv = buildCsv(rows, ['Section','Key','Value']);
-                downloadCsv('individual_questionnaire.csv', csv);
-              });
-            <\/script>
-          </body>
-          </html>
-        `);
-          w.document.close();
+          const householdsList = document.getElementById("householdsList");
+          const aadhaarResult = document.getElementById("aadhaarResult");
+          const target = householdsList || aadhaarResult;
+          if (!target) {
+            throw new Error("No target container found for response view");
+          }
+
+          const previousHtml = target.innerHTML;
+          target.innerHTML = html;
+
+          const buildCsv = (dataRows, headers) => {
+            const safe = (v) =>
+              '"' + String(v ?? "").replace(/"/g, '""') + '"';
+            const headerLine = headers.map(safe).join(",");
+            const dataLines = dataRows.map((r) =>
+              headers.map((h) => safe(r[h])).join(","),
+            );
+            return [headerLine, ...dataLines].join("\n");
+          };
+
+          const downloadCsv = (filename, csvText) => {
+            const blob = new Blob([csvText], {
+              type: "text/csv;charset=utf-8;",
+            });
+            const link = document.createElement("a");
+            link.href = URL.createObjectURL(blob);
+            link.download = filename;
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+          };
+
+          const exportBtn = document.getElementById("inlineExportCsvBtn");
+          if (exportBtn) {
+            exportBtn.addEventListener("click", () => {
+              const csv = buildCsv(rows, ["Section", "Key", "Value"]);
+              downloadCsv("individual_questionnaire.csv", csv);
+            });
+          }
+
+          const backBtn = document.getElementById("inlineBackBtn");
+          if (backBtn) {
+            backBtn.addEventListener("click", () => {
+              target.innerHTML = previousHtml;
+            });
+          }
         } catch (error) {
           showMessage(
             "Failed to load individual response: " + error.message,
@@ -6068,7 +6109,7 @@
 
         const visibleIds = new Set();
         let html =
-          '<table class="data-table"><tr><th><label style="display:flex;align-items:center;gap:8px;"><input type="checkbox" id="hhSelectAll" onchange="toggleSelectAll(this)"> <span>Select All</span></label></th><th>Household Number</th><th>Household ID</th><th>Username</th><th>Village LGD</th><th>Survey Status</th><th>Actions</th></tr>';
+          '<table class="data-table"><tr><th><label style="display:flex;align-items:center;gap:8px;"><input type="checkbox" id="hhSelectAll" onchange="toggleSelectAll(this)"> <span>Select All</span></label></th><th>Household Number</th><th>Household ID</th><th>Username</th><th>Village LGD</th><th>Survey Status</th><th>Last Updated</th><th>Actions</th></tr>';
         households.forEach((h) => {
           const householdId = h.household_id ?? h.id ?? "N/A";
           const headName =
@@ -6084,6 +6125,12 @@
           if (householdId !== "N/A") visibleIds.add(idStr);
           const isChecked = selectedHouseholds.has(idStr);
           const disabled = householdId === "N/A" ? "disabled" : "";
+          const rawUpdatedAt = h.last_updated_at || null;
+          const rawUpdatedBy = h.last_updated_by || "System";
+          const updatedAtText = rawUpdatedAt
+            ? new Date(rawUpdatedAt).toLocaleString()
+            : "N/A";
+          const updatedMeta = `${updatedAtText} by ${rawUpdatedBy}`;
 
           html += `<tr>
           <td><input type="checkbox" class="hh-select" data-id="${escapeAttr(idStr)}" ${isChecked ? "checked" : ""} ${disabled} onchange="toggleHouseholdSelection(this)"></td>
@@ -6092,6 +6139,7 @@
           <td>${escapeAttr(username)}</td>
           <td>${escapeAttr(village)}</td>
           <td>${householdStatusBadge(h)}</td>
+          <td>${escapeAttr(updatedMeta)}</td>
           <td class="actions">
             <button class="btn btn-edit" onclick="viewHousehold('${escapeJsStr(householdId)}')">View</button>
             <button class="btn btn-danger" onclick="deleteHousehold('${escapeJsStr(householdId)}')">Delete</button>
@@ -6198,8 +6246,191 @@
           );
       }
 
-      function viewHousehold(id) {
-        alert("View household " + id + " (Implement view details)");
+      async function viewHousehold(id) {
+        if (!id || id === "N/A") {
+          showMessage("Invalid household ID", "error");
+          return;
+        }
+
+        try {
+          const householdRes = await apiFetch(
+            `/api/admin/household/${encodeURIComponent(id)}`,
+          );
+          const household = await householdRes.json();
+
+          const responsesRes = await apiFetch(
+            `/api/admin/household/${encodeURIComponent(id)}/responses`,
+          );
+          const responses = await responsesRes.json();
+
+          const sectionTimesRes = await apiFetch(
+            `/api/admin/household/${encodeURIComponent(id)}/main-section-times`,
+          );
+          const sectionTimes = await sectionTimesRes.json();
+
+          const membersRes = await apiFetch(
+            `/api/admin/household/${encodeURIComponent(id)}/individual-members`,
+          );
+          const members = await membersRes.json();
+
+          let html = `
+            <div class="form-container" style="margin-bottom: 20px;">
+              <h3 style="margin-top:0;">Household Details</h3>
+              <table class="data-table">
+                <tr><th>Household ID</th><td>${escapeAttr(household.household_id ?? "")}</td></tr>
+                <tr><th>Name</th><td>${escapeAttr(household.household_name ?? "")}</td></tr>
+                <tr><th>User</th><td>${escapeAttr(household.username ?? "N/A")}</td></tr>
+                <tr><th>Location</th><td>${escapeAttr(household.state_name || "N/A")} → ${escapeAttr(household.district_name || "N/A")} → ${escapeAttr(household.block_name || "N/A")} → ${escapeAttr(household.village_name || "N/A")}</td></tr>
+                <tr><th>Created</th><td>${household.created_at ? new Date(household.created_at).toLocaleString() : "N/A"}</td></tr>
+              </table>
+            </div>
+          `;
+
+          if (Array.isArray(responses) && responses.length > 0) {
+            html += `
+              <div class="form-container">
+                <h3 style="margin-top:0;">Questionnaire Responses (${responses.length})</h3>
+                <table class="data-table">
+                  <tr><th>Section</th><th>Question</th><th>Answer</th><th>Type</th></tr>
+                  ${responses
+                    .map((r) => {
+                      const answer =
+                        r.answer_text ?? r.answer_numerical ?? "No answer";
+                      const questionLabel = `${r.question_text || ""}${Number(r.is_mandatory) === 1 ? " *" : ""}`;
+                      return `<tr>
+                        <td>${escapeAttr(r.section_title || "")}</td>
+                        <td>${escapeAttr(questionLabel)}</td>
+                        <td>${escapeAttr(String(answer))}</td>
+                        <td>${escapeAttr(r.question_type || "")}</td>
+                      </tr>`;
+                    })
+                    .join("")}
+                </table>
+              </div>
+            `;
+          } else {
+            html +=
+              '<div class="empty-state">No questionnaire responses submitted yet.</div>';
+          }
+
+          if (Array.isArray(sectionTimes) && sectionTimes.length > 0) {
+            html += `
+              <div class="form-container" style="margin-top: 20px;">
+                <h3 style="margin-top:0;">Main Questionnaire - Section Wise Time</h3>
+                <table class="data-table">
+                  <tr><th>Section</th><th>Time (HH:MM:SS)</th></tr>
+                  ${sectionTimes
+                    .map((t) => {
+                      const sectionName =
+                        t.section_title || "Section " + String(t.section_id || "");
+                      const seconds = Number(t.seconds || 0);
+                      return `<tr>
+                        <td>${escapeAttr(sectionName)}</td>
+                        <td>${escapeAttr(formatDurationHMS(seconds))}</td>
+                      </tr>`;
+                    })
+                    .join("")}
+                </table>
+              </div>
+            `;
+          }
+
+          if (Array.isArray(members) && members.length > 0) {
+            html += `
+              <div class="form-container" style="margin-top: 20px;">
+                <h3 style="margin-top:0;">Family Members - Individual Responses (${members.length})</h3>
+                <table class="data-table">
+                  <tr><th>Name</th><th>Age</th><th>Gender</th><th>Action</th></tr>
+                  ${members
+                    .map(
+                      (m) => `<tr>
+                        <td>${escapeAttr(m.name || "N/A")}</td>
+                        <td>${escapeAttr(String(m.age ?? "N/A"))}</td>
+                        <td>${escapeAttr(String(m.gender ?? "N/A"))}</td>
+                        <td class="actions">
+                          <button class="btn btn-edit" onclick="viewIndividualResponse(${Number(m.individual_questionnaire_id)})">View Response</button>
+                        </td>
+                      </tr>`,
+                    )
+                    .join("")}
+                </table>
+              </div>
+            `;
+          } else {
+            html += '<div class="empty-state" style="margin-top: 20px;">No individual member responses found for this household.</div>';
+          }
+
+          html +=
+            `<div style="margin-top:16px; display:flex; gap:8px; flex-wrap:wrap;">
+              <button class="btn btn-primary" onclick="viewHouseholdEditHistory('${escapeJsStr(id)}')">View Full Edit History</button>
+              <button class="btn btn-secondary" onclick="searchHouseholds()">Back to List</button>
+            </div>`;
+          document.getElementById("householdsList").innerHTML = html;
+        } catch (error) {
+          showMessage("Error loading household details: " + error.message, "error");
+        }
+      }
+
+      async function viewHouseholdEditHistory(id) {
+        if (!id || id === "N/A") {
+          showMessage("Invalid household ID", "error");
+          return;
+        }
+
+        try {
+          const historyRes = await apiFetch(
+            `/api/admin/household/${encodeURIComponent(id)}/history`,
+          );
+          const history = await historyRes.json();
+
+          let html = `
+            <div class="form-container" style="margin-bottom: 20px;">
+              <h3 style="margin-top:0;">Edit History - Household ${escapeAttr(id)}</h3>
+            </div>
+          `;
+
+          if (Array.isArray(history) && history.length > 0) {
+            html += `
+              <table class="data-table">
+                <tr>
+                  <th>When</th>
+                  <th>Edited By</th>
+                  <th>Action</th>
+                  <th>Source</th>
+                </tr>
+                ${history
+                  .map((h) => {
+                    const changedAt = h.changed_at
+                      ? new Date(h.changed_at).toLocaleString()
+                      : "N/A";
+                    const changedBy =
+                      h.changed_by_username ||
+                      (h.changed_by_user_id
+                        ? `User ID ${h.changed_by_user_id}`
+                        : "System");
+                    return `<tr>
+                      <td>${escapeAttr(changedAt)}</td>
+                      <td>${escapeAttr(String(changedBy))}</td>
+                      <td>${escapeAttr(h.change_action || "update")}</td>
+                      <td>${escapeAttr(h.source || "-")}</td>
+                    </tr>`;
+                  })
+                  .join("")}
+              </table>
+            `;
+          } else {
+            html += '<div class="empty-state">No edit history found for this household.</div>';
+          }
+
+          html += `<div style="margin-top:16px; display:flex; gap:8px; flex-wrap:wrap;">
+            <button class="btn btn-secondary" onclick="viewHousehold('${escapeJsStr(id)}')">Back to Household</button>
+            <button class="btn btn-secondary" onclick="searchHouseholds()">Back to List</button>
+          </div>`;
+
+          document.getElementById("householdsList").innerHTML = html;
+        } catch (error) {
+          showMessage("Error loading household edit history: " + error.message, "error");
+        }
       }
 
       async function deleteHousehold(id) {

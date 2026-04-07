@@ -220,7 +220,7 @@ docker-compose logs db
 # Wait ~30 seconds for MySQL to initialize
 sleep 30
 ```
-cd "d:\Projects\Survey\survey_app"; .\.venv\Scripts\python.exe app.py
+cd "d:\Projects\Survey\survey_app"; 
 #### Step 4: Access phpMyAdmin (Optional)
 
 ```
@@ -317,6 +317,8 @@ From the `app` directory:
 ```bash
 cd app
 python app.py
+OR
+.\.venv\Scripts\python.exe app.py
 ```
 
 **Expected output:**

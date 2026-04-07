@@ -1656,14 +1656,6 @@ def save_survey_draft():
         existing["updated_at"] = datetime.now().isoformat()
 
         if row and row.get("draft_id"):
-            _log_draft_history(
-                row.get("draft_id"),
-                household_id,
-                row.get("response_data"),
-                action="save_survey_draft",
-                user_id=user_id,
-                username=session.get("username"),
-            )
             db.session.execute(sql_text("""
                 UPDATE household_response_drafts
                 SET response_data = :data
@@ -2163,10 +2155,14 @@ def save_responses():
         if section_id is None:
             return json_error("section_id is required", 400)
         responses = data.get("responses", {})
+        section_time_spent_seconds = safe_int(data.get("section_time_spent_seconds"), 0)
         is_skipped = bool(data.get("is_skipped"))
         if not isinstance(responses, dict):
             responses = {}
-        if not responses and not is_skipped:
+        if responses and not is_skipped and section_time_spent_seconds <= 0:
+            # If the user has answered in this section, persist at least 1 second.
+            section_time_spent_seconds = 1
+        if not responses and not is_skipped and section_time_spent_seconds <= 0:
             return jsonify({"success": True, "message": "No responses to save"})
         timestamp = data.get("timestamp", datetime.now().isoformat())
         
@@ -2216,10 +2212,14 @@ def save_responses():
 
         sections = existing.get("sections", {})
         survey_state = existing.get("survey_state")
+        existing_section = sections.get(str(section_id), {}) if isinstance(sections, dict) else {}
+        existing_time = safe_int((existing_section or {}).get("time_spent_seconds"), 0)
+        merged_time = max(existing_time, section_time_spent_seconds)
         sections[str(section_id)] = {
             "responses": responses,
             "is_skipped": is_skipped,
-            "timestamp": timestamp
+            "timestamp": timestamp,
+            "time_spent_seconds": merged_time,
         }
 
         payload = {
@@ -2233,14 +2233,6 @@ def save_responses():
             payload["survey_state"] = survey_state
 
         if row and row.get("draft_id"):
-            _log_draft_history(
-                row.get("draft_id"),
-                household_id,
-                row.get("response_data"),
-                action="save_responses",
-                user_id=user_id,
-                username=session.get("username"),
-            )
             db.session.execute(sql_text("""
                 UPDATE household_response_drafts
                 SET response_data = :data
@@ -2388,13 +2380,35 @@ def submit_main_questionnaire():
         if not isinstance(responses, dict) or len(responses) == 0:
             return json_error("responses is required", 400)
 
+        # Merge client-submitted section times with draft section times so zeros cannot overwrite real elapsed values.
+        section_time_spent_seconds_map = data.get("section_time_spent_seconds")
+        submitted_time_map = {}
+        if isinstance(section_time_spent_seconds_map, dict):
+            submitted_time_map = {
+                str(k): safe_int(v, 0) for k, v in section_time_spent_seconds_map.items()
+            }
+
+        draft_time_map = {}
+        sections_obj = (draft_payload or {}).get("sections", {}) if isinstance(draft_payload, dict) else {}
+        if isinstance(sections_obj, dict):
+            for sid, sec in sections_obj.items():
+                sec_obj = sec if isinstance(sec, dict) else {}
+                draft_time_map[str(sid)] = safe_int(sec_obj.get("time_spent_seconds"), 0)
+
+        all_sids = set(draft_time_map.keys()) | set(submitted_time_map.keys())
+        section_time_spent_seconds_map = {
+            sid: max(safe_int(draft_time_map.get(sid), 0), safe_int(submitted_time_map.get(sid), 0))
+            for sid in all_sids
+        }
+
         payload = json.dumps({
             "responses": responses,
             "status": "household_submitted",
             "household_submitted_at": datetime.now().isoformat(),
             "household_id": household_id,
             "submitted_by_user_id": user_id,
-            "submitted_by_username": session.get("username")
+            "submitted_by_username": session.get("username"),
+            "section_time_spent_seconds": section_time_spent_seconds_map,
         })
 
         existing_id = safe_int(data.get("main_questionnaire_id")) or safe_int(session.get("main_questionnaire_id"))
@@ -2595,22 +2609,56 @@ def submit_individual_questionnaire():
                 main_id = insert_main.lastrowid
             session["main_questionnaire_id"] = main_id
 
+        individual_time_spent_raw = data.get("individual_section_time_spent_seconds")
+        if isinstance(individual_time_spent_raw, dict):
+            individual_time_spent = {
+                str(k): safe_int(v, 0)
+                for k, v in individual_time_spent_raw.items()
+            }
+        else:
+            individual_time_spent = {}
+
         payload = json.dumps({
             "member": member_meta,
             "responses": responses,
             "submitted_at": datetime.now().isoformat(),
             "household_id": household_id,
             "submitted_by_user_id": user_id,
-            "submitted_by_username": session.get("username")
+            "submitted_by_username": session.get("username"),
+            "section_time_spent_seconds": individual_time_spent,
         })
 
-        insert_ind = db.session.execute(sql_text("""
-            INSERT INTO individual_questionnaire_responses (responses, aadhar_hash)
-            VALUES (:resp, :ah)
-        """), {"resp": payload, "ah": aadhar_hash})
-        db.session.commit()
+        existing = db.session.execute(sql_text("""
+            SELECT ir.individual_questionnaire_id
+            FROM individual_questionnaire_responses ir
+            JOIN main_individual_questionnaire_links l
+              ON l.individual_questionnaire_id = ir.individual_questionnaire_id
+            WHERE l.household_id = :hid
+              AND ir.aadhar_hash = :ah
+            ORDER BY ir.individual_questionnaire_id DESC
+            LIMIT 1
+        """), {"hid": household_id, "ah": aadhar_hash}).mappings().fetchone()
 
-        individual_id = insert_ind.lastrowid
+        if existing:
+            individual_id = existing["individual_questionnaire_id"]
+            db.session.execute(sql_text("""
+                UPDATE individual_questionnaire_responses
+                SET responses = :resp, aadhar_hash = :ah
+                WHERE individual_questionnaire_id = :iid
+            """), {"resp": payload, "ah": aadhar_hash, "iid": individual_id})
+        else:
+            insert_ind = db.session.execute(sql_text("""
+                INSERT INTO individual_questionnaire_responses (responses, aadhar_hash)
+                VALUES (:resp, :ah)
+            """), {"resp": payload, "ah": aadhar_hash})
+            individual_id = insert_ind.lastrowid
+
+        # Keep one link row for the selected household + individual response.
+        db.session.execute(sql_text("""
+            DELETE FROM main_individual_questionnaire_links
+            WHERE household_id = :hid
+              AND individual_questionnaire_id = :iid
+        """), {"hid": household_id, "iid": individual_id})
 
         db.session.execute(sql_text("""
             INSERT INTO main_individual_questionnaire_links
@@ -2811,6 +2859,8 @@ def admin_get_individual_response(individual_questionnaire_id):
             payload = json.loads(row["responses"]) if isinstance(row["responses"], str) else row["responses"]
         except Exception:
             payload = row["responses"]
+        if not isinstance(payload, dict):
+            payload = {"responses": {}}
 
         try:
             member = (payload or {}).get("member") or {}
@@ -2819,9 +2869,52 @@ def admin_get_individual_response(individual_questionnaire_id):
         except Exception:
             pass
 
+        section_time_map = (payload or {}).get("section_time_spent_seconds") or (payload or {}).get("individual_section_time_spent_seconds") or {}
+        if not isinstance(section_time_map, dict):
+            section_time_map = {}
+        if not section_time_map and isinstance((payload or {}).get("responses"), dict):
+            nested_map = (payload or {}).get("responses", {}).get("section_time_spent_seconds") or (payload or {}).get("responses", {}).get("individual_section_time_spent_seconds") or {}
+            if isinstance(nested_map, dict):
+                section_time_map = nested_map
+        if not section_time_map and isinstance((payload or {}).get("responses"), dict):
+            nested_sections = (payload or {}).get("responses", {}).get("sections") or []
+            if isinstance(nested_sections, list):
+                for sec in nested_sections:
+                    if isinstance(sec, dict) and sec.get("section_id") is not None:
+                        section_time_map[str(sec.get("section_id"))] = safe_int(sec.get("time_spent_seconds"), 0)
+        if not isinstance(section_time_map, dict):
+            section_time_map = {}
+
+        section_rows = db.session.execute(sql_text("""
+            SELECT section_id, section_title, section_order
+            FROM individual_questionnaire_sections
+        """)).mappings().all()
+        section_meta = {
+            str(r.get("section_id")): {
+                "section_title": r.get("section_title") or "",
+                "section_order": safe_int(r.get("section_order"), 0),
+            }
+            for r in section_rows
+        }
+
+        section_times = []
+        for sid, secs in section_time_map.items():
+            seconds = safe_int(secs, 0)
+            meta = section_meta.get(str(sid), {})
+            section_times.append({
+                "section_id": safe_int(sid),
+                "section_title": meta.get("section_title") or f"Section {sid}",
+                "seconds": seconds,
+                "_order": meta.get("section_order", 0),
+            })
+        section_times.sort(key=lambda x: (safe_int(x.get("_order"), 0), safe_int(x.get("section_id"), 0)))
+        for item in section_times:
+            item.pop("_order", None)
+
         return jsonify({
             "individual_questionnaire_id": row["individual_questionnaire_id"],
-            "responses": payload
+            "responses": payload,
+            "section_times": section_times,
         })
     except Exception as e:
         return json_error(str(e), 500, traceback.format_exc())
@@ -2982,12 +3075,41 @@ def admin_get_all_households():
             SELECT DISTINCT
                 h.household_id,
                 h.name AS head_name,
-                COALESCE(u.username, u_owner.username, '—') AS username,
+                COALESCE(u_owner.username, '—') AS username,
                 s.name AS state_name,
                 d.name AS district_name,
                 b.name AS block_name,
                 sc.name AS sub_center_name,
                 v.village_lgd_code AS village_lgd_code,
+                COALESCE((
+                    SELECT edits.changed_at
+                    FROM (
+                        SELECT changed_at
+                        FROM main_questionnaire_response_history
+                        WHERE household_id = h.household_id
+                        UNION ALL
+                        SELECT changed_at
+                        FROM household_response_draft_history
+                        WHERE household_id = h.household_id
+                    ) edits
+                    ORDER BY edits.changed_at DESC
+                    LIMIT 1
+                ), h.created_at) AS last_updated_at,
+                COALESCE((
+                    SELECT edits.changed_by_username
+                    FROM (
+                        SELECT changed_at, changed_by_username
+                        FROM main_questionnaire_response_history
+                        WHERE household_id = h.household_id
+                        UNION ALL
+                        SELECT changed_at, changed_by_username
+                        FROM household_response_draft_history
+                        WHERE household_id = h.household_id
+                    ) edits
+                    WHERE edits.changed_by_username IS NOT NULL AND TRIM(edits.changed_by_username) <> ''
+                    ORDER BY edits.changed_at DESC
+                    LIMIT 1
+                ), u_owner.username, 'System') AS last_updated_by,
                 mqr.responses AS main_responses,
                 dr.response_data AS draft_data
             FROM households h
@@ -2997,8 +3119,6 @@ def admin_get_all_households():
                 GROUP BY household_id
             ) mm ON mm.household_id = h.household_id
             LEFT JOIN main_questionnaire_responses mqr ON mqr.main_questionnaire_id = mm.main_questionnaire_id
-            LEFT JOIN survey_contributors contrib ON contrib.main_questionnaire_id = mm.main_questionnaire_id
-            LEFT JOIN users u ON contrib.user_id = u.user_id
             LEFT JOIN users u_owner ON h.user_id = u_owner.user_id
             LEFT JOIN states s ON h.state_id = s.state_id
             LEFT JOIN districts d ON h.district_id = d.district_id
@@ -3017,7 +3137,7 @@ def admin_get_all_households():
         """
         params = {}
         if search:
-            base += " WHERE h.name LIKE :q OR u.username LIKE :q OR u_owner.username LIKE :q OR CAST(v.village_lgd_code AS CHAR) LIKE :q OR CAST(h.household_id AS CHAR) LIKE :q"
+            base += " WHERE h.name LIKE :q OR u_owner.username LIKE :q OR CAST(v.village_lgd_code AS CHAR) LIKE :q OR CAST(h.household_id AS CHAR) LIKE :q"
             params["q"] = f"%{search}%"
         base += " ORDER BY h.household_id DESC LIMIT 500"
 
@@ -3104,15 +3224,44 @@ def admin_filter_households():
         village_id = safe_int(request.args.get("village_id"))
 
         base = """
-            SELECT
+            SELECT DISTINCT
                 h.household_id,
                 h.name AS head_name,
-                COALESCE(u.username, u_owner.username, 'â€”') AS username,
+                COALESCE(u_owner.username, '—') AS username,
                 s.name AS state_name,
                 d.name AS district_name,
                 b.name AS block_name,
                 sc.name AS sub_center_name,
                 v.village_lgd_code AS village_lgd_code,
+                COALESCE((
+                    SELECT edits.changed_at
+                    FROM (
+                        SELECT changed_at
+                        FROM main_questionnaire_response_history
+                        WHERE household_id = h.household_id
+                        UNION ALL
+                        SELECT changed_at
+                        FROM household_response_draft_history
+                        WHERE household_id = h.household_id
+                    ) edits
+                    ORDER BY edits.changed_at DESC
+                    LIMIT 1
+                ), h.created_at) AS last_updated_at,
+                COALESCE((
+                    SELECT edits.changed_by_username
+                    FROM (
+                        SELECT changed_at, changed_by_username
+                        FROM main_questionnaire_response_history
+                        WHERE household_id = h.household_id
+                        UNION ALL
+                        SELECT changed_at, changed_by_username
+                        FROM household_response_draft_history
+                        WHERE household_id = h.household_id
+                    ) edits
+                    WHERE edits.changed_by_username IS NOT NULL AND TRIM(edits.changed_by_username) <> ''
+                    ORDER BY edits.changed_at DESC
+                    LIMIT 1
+                ), u_owner.username, 'System') AS last_updated_by,
                 mqr.responses AS main_responses,
                 dr.response_data AS draft_data
             FROM households h
@@ -3122,8 +3271,6 @@ def admin_filter_households():
                 GROUP BY household_id
             ) mm ON mm.household_id = h.household_id
             LEFT JOIN main_questionnaire_responses mqr ON mqr.main_questionnaire_id = mm.main_questionnaire_id
-            LEFT JOIN survey_contributors contrib ON contrib.main_questionnaire_id = mm.main_questionnaire_id
-            LEFT JOIN users u ON contrib.user_id = u.user_id
             LEFT JOIN users u_owner ON h.user_id = u_owner.user_id
             LEFT JOIN states s ON h.state_id = s.state_id
             LEFT JOIN districts d ON h.district_id = d.district_id
@@ -3145,7 +3292,7 @@ def admin_filter_households():
         params = {}
 
         if search:
-            filters.append("(h.name LIKE :q OR u.username LIKE :q OR u_owner.username LIKE :q OR CAST(v.village_lgd_code AS CHAR) LIKE :q OR CAST(h.household_id AS CHAR) LIKE :q)")
+            filters.append("(h.name LIKE :q OR u_owner.username LIKE :q OR CAST(v.village_lgd_code AS CHAR) LIKE :q OR CAST(h.household_id AS CHAR) LIKE :q)")
             params["q"] = f"%{search}%"
         if state_id:
             filters.append("h.state_id = :state_id")
@@ -3645,9 +3792,38 @@ def admin_search_households():
     return jsonify([dict(r) for r in rows])
 
 
-@app.route("/api/admin/household/<int:household_id>", methods=["DELETE"])
+@app.route("/api/admin/household/<int:household_id>", methods=["GET", "DELETE"])
 @role_required("admin")
 def admin_delete_household(household_id):
+    if request.method == "GET":
+        try:
+            row = db.session.execute(sql_text("""
+                SELECT
+                    h.household_id,
+                    h.name AS household_name,
+                    h.created_at,
+                    COALESCE(u.username, 'N/A') AS username,
+                    s.name AS state_name,
+                    d.name AS district_name,
+                    b.name AS block_name,
+                    sc.name AS sub_center_name,
+                    v.name AS village_name
+                FROM households h
+                LEFT JOIN users u ON u.user_id = h.user_id
+                LEFT JOIN states s ON s.state_id = h.state_id
+                LEFT JOIN districts d ON d.district_id = h.district_id
+                LEFT JOIN blocks b ON b.block_id = h.block_id
+                LEFT JOIN sub_centers sc ON sc.sub_center_id = h.sub_center_id
+                LEFT JOIN villages v ON v.village_id = h.village_id
+                WHERE h.household_id = :hid
+                LIMIT 1
+            """), {"hid": household_id}).mappings().fetchone()
+            if not row:
+                return json_error("Household not found", 404)
+            return jsonify(dict(row))
+        except Exception as e:
+            return json_error(str(e), 500)
+
     try:
         def table_exists(name: str) -> bool:
             row = db.session.execute(sql_text("""
@@ -3731,6 +3907,242 @@ def admin_delete_household(household_id):
     except Exception as e:
         db.session.rollback()
         return json_error(str(e), 500, traceback.format_exc())
+
+
+@app.route("/api/admin/household/<int:household_id>/responses")
+@role_required("admin")
+def admin_get_household_responses(household_id):
+    try:
+        row = db.session.execute(sql_text("""
+            SELECT responses
+            FROM main_questionnaire_responses
+            WHERE household_id = :hid
+            ORDER BY main_questionnaire_id DESC
+            LIMIT 1
+        """), {"hid": household_id}).mappings().fetchone()
+
+        if not row:
+            return jsonify([])
+
+        payload = safe_json_load(row.get("responses")) or {}
+        responses_map = (payload or {}).get("responses") or {}
+        if not isinstance(responses_map, dict) or not responses_map:
+            return jsonify([])
+
+        question_rows = db.session.execute(sql_text("""
+            SELECT
+                q.question_id,
+                q.question_text,
+                q.question_type,
+                COALESCE(q.is_mandatory, 0) AS is_mandatory,
+                qs.section_title,
+                qs.section_order,
+                q.question_order
+            FROM questions q
+            LEFT JOIN questionnaire_sections qs ON qs.section_id = q.question_section_id
+        """)).mappings().all()
+
+        qmap = {
+            int(r["question_id"]): {
+                "question_text": r.get("question_text") or "",
+                "question_type": r.get("question_type") or "",
+                "is_mandatory": int(r.get("is_mandatory") or 0),
+                "section_title": r.get("section_title") or "",
+                "section_order": safe_int(r.get("section_order"), 0),
+                "question_order": safe_int(r.get("question_order"), 0),
+            }
+            for r in question_rows
+            if safe_int(r.get("question_id")) is not None
+        }
+
+        out = []
+        for raw_qid, ans in responses_map.items():
+            qid = safe_int(raw_qid)
+            if qid is None:
+                continue
+            meta = qmap.get(qid, {})
+
+            if isinstance(ans, (dict, list)):
+                answer_text = json.dumps(ans, ensure_ascii=False)
+                answer_num = None
+            elif isinstance(ans, (int, float)):
+                answer_text = None
+                answer_num = ans
+            else:
+                answer_text = "" if ans is None else str(ans)
+                answer_num = None
+
+            out.append({
+                "section_title": meta.get("section_title", ""),
+                "question_text": meta.get("question_text", f"Question {qid}"),
+                "question_type": meta.get("question_type", ""),
+                "is_mandatory": meta.get("is_mandatory", 0),
+                "answer_text": answer_text,
+                "answer_numerical": answer_num,
+                "_sort_section": meta.get("section_order", 0),
+                "_sort_question": meta.get("question_order", 0),
+            })
+
+        out.sort(key=lambda x: (safe_int(x.get("_sort_section"), 0), safe_int(x.get("_sort_question"), 0)))
+        for item in out:
+            item.pop("_sort_section", None)
+            item.pop("_sort_question", None)
+
+        return jsonify(out)
+    except Exception as e:
+        return json_error(str(e), 500)
+
+
+@app.route("/api/admin/household/<int:household_id>/main-section-times")
+@role_required("admin")
+def admin_get_household_main_section_times(household_id):
+    try:
+        row = db.session.execute(sql_text("""
+            SELECT responses
+            FROM main_questionnaire_responses
+            WHERE household_id = :hid
+            ORDER BY main_questionnaire_id DESC
+            LIMIT 1
+        """), {"hid": household_id}).mappings().fetchone()
+
+        if not row:
+            return jsonify([])
+
+        payload = safe_json_load(row.get("responses")) or {}
+        section_time_map = (payload or {}).get("section_time_spent_seconds") or {}
+
+        if not isinstance(section_time_map, dict) or not section_time_map:
+            draft_row = db.session.execute(sql_text("""
+                SELECT response_data
+                FROM household_response_drafts
+                WHERE household_id = :hid
+                ORDER BY updated_at DESC
+                LIMIT 1
+            """), {"hid": household_id}).mappings().fetchone()
+            draft_payload = safe_json_load(draft_row.get("response_data")) if draft_row else {}
+            sections = (draft_payload or {}).get("sections") or {}
+            if isinstance(sections, dict):
+                section_time_map = {
+                    str(sid): safe_int((sec or {}).get("time_spent_seconds"), 0)
+                    for sid, sec in sections.items()
+                }
+
+        section_rows = db.session.execute(sql_text("""
+            SELECT section_id, section_title, section_order
+            FROM questionnaire_sections
+        """)).mappings().all()
+        section_meta = {
+            str(r.get("section_id")): {
+                "section_title": r.get("section_title") or "",
+                "section_order": safe_int(r.get("section_order"), 0),
+            }
+            for r in section_rows
+        }
+
+        out = []
+        for sid, secs in (section_time_map or {}).items():
+            seconds = safe_int(secs, 0)
+            meta = section_meta.get(str(sid), {})
+            out.append({
+                "section_id": safe_int(sid),
+                "section_title": meta.get("section_title") or f"Section {sid}",
+                "seconds": seconds,
+                "_order": meta.get("section_order", 0),
+            })
+
+        out.sort(key=lambda x: (safe_int(x.get("_order"), 0), safe_int(x.get("section_id"), 0)))
+        for item in out:
+            item.pop("_order", None)
+
+        return jsonify(out)
+    except Exception as e:
+        return json_error(str(e), 500)
+
+
+@app.route("/api/admin/household/<int:household_id>/individual-members")
+@role_required("admin")
+def admin_get_household_individual_members(household_id):
+    try:
+        rows = db.session.execute(sql_text("""
+            SELECT
+                ir.individual_questionnaire_id,
+                ir.responses
+            FROM individual_questionnaire_responses ir
+            JOIN main_individual_questionnaire_links l
+              ON l.individual_questionnaire_id = ir.individual_questionnaire_id
+            WHERE l.household_id = :hid
+            ORDER BY ir.individual_questionnaire_id DESC
+        """), {"hid": household_id}).mappings().all()
+
+        members = []
+        for r in rows:
+            payload = safe_json_load(r.get("responses")) or {}
+            member = (payload or {}).get("member") or {}
+            first_name = (member.get("first_name") or "").strip()
+            middle_name = (member.get("middle_name") or "").strip()
+            surname = (member.get("surname") or "").strip()
+            full_name = " ".join([first_name, middle_name, surname]).strip() or "N/A"
+
+            members.append({
+                "individual_questionnaire_id": r.get("individual_questionnaire_id"),
+                "name": full_name,
+                "age": member.get("age"),
+                "gender": member.get("gender"),
+            })
+
+        return jsonify(members)
+    except Exception as e:
+        return json_error(str(e), 500)
+
+
+@app.route("/api/admin/household/<int:household_id>/history")
+@role_required("admin")
+def admin_get_household_history(household_id):
+    try:
+        rows = db.session.execute(sql_text("""
+            SELECT
+                edits.changed_at,
+                edits.changed_by_username,
+                edits.changed_by_user_id,
+                edits.change_action,
+                edits.source
+            FROM (
+                SELECT
+                    changed_at,
+                    changed_by_username,
+                    changed_by_user_id,
+                    change_action,
+                    'main' AS source
+                FROM main_questionnaire_response_history
+                WHERE household_id = :hid
+
+                UNION ALL
+
+                SELECT
+                    changed_at,
+                    changed_by_username,
+                    changed_by_user_id,
+                    change_action,
+                    'draft' AS source
+                FROM household_response_draft_history
+                WHERE household_id = :hid
+            ) edits
+            WHERE COALESCE(edits.change_action, '') NOT IN ('save_survey_draft', 'save_responses')
+            ORDER BY edits.changed_at DESC
+        """), {"hid": household_id}).mappings().all()
+
+        history = []
+        for r in rows:
+            history.append({
+                "changed_at": r.get("changed_at"),
+                "changed_by_username": r.get("changed_by_username"),
+                "changed_by_user_id": r.get("changed_by_user_id"),
+                "change_action": r.get("change_action"),
+                "source": r.get("source"),
+            })
+        return jsonify(history)
+    except Exception as e:
+        return json_error(str(e), 500)
 
 
 @app.route("/api/admin/search-users")

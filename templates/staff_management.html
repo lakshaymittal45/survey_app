@@ -68,6 +68,7 @@
         <div id="sectionTitleContainer" class="mb-8">
           <h2 id="currentSectionTitle" class="text-3xl font-extrabold text-slate-900 tracking-tight">Loading...</h2>
           <p class="text-slate-500 mt-2">Please answer all required questions in this segment.</p>
+          <p class="text-slate-500 mt-1">Time spent in this section: <span id="mainSectionTimer" class="font-bold text-slate-700">00:00:00</span></p>
         </div>
 
         <div id="sectionErrorBanner" class="hidden mb-6 p-4 rounded-xl border border-red-200 bg-red-50 text-red-700 font-medium">
@@ -280,6 +281,7 @@
         <div id="iq_sectionTitleContainer" class="mb-8">
           <h2 id="iq_currentSectionTitle" class="text-3xl font-extrabold text-slate-900 tracking-tight">Loading...</h2>
           <p class="text-slate-500 mt-2">Please answer all required questions for this member.</p>
+          <p class="text-slate-500 mt-1">Time spent in this section: <span id="iqSectionTimer" class="font-bold text-slate-700">00:00:00</span></p>
         </div>
 
         <div id="iq_sectionErrorBanner" class="hidden mb-6 p-4 rounded-xl border border-red-200 bg-red-50 text-red-700 font-medium">
@@ -360,6 +362,113 @@ let draftSaveTimer = null;
 let skippedSectionIds = [];
 let iqSkippedSectionIds = [];
 let forceMainStage = false;
+let mainSectionTimeSpent = {};
+let iqSectionTimeSpent = {};
+let mainSectionTouched = {};
+let iqSectionTouched = {};
+let mainSectionEnteredAtMs = null;
+let iqSectionEnteredAtMs = null;
+let sectionTimerIntervalId = null;
+
+function formatDurationHMS(totalSeconds) {
+  const secs = Math.max(0, Math.floor(Number(totalSeconds) || 0));
+  const hh = Math.floor(secs / 3600);
+  const mm = Math.floor((secs % 3600) / 60);
+  const ss = secs % 60;
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${pad(hh)}:${pad(mm)}:${pad(ss)}`;
+}
+
+function normalizeSectionTimerMap(raw) {
+  const out = {};
+  if (!raw || typeof raw !== 'object') return out;
+  Object.entries(raw).forEach(([k, v]) => {
+    const n = Number(v);
+    out[String(k)] = Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
+  });
+  return out;
+}
+
+function sanitizeSectionTimerMap(raw) {
+  const out = {};
+  if (!raw || typeof raw !== 'object') return out;
+  Object.entries(raw).forEach(([k, v]) => {
+    const n = Math.floor(Number(v) || 0);
+    if (n > 0) out[String(k)] = n;
+  });
+  return out;
+}
+
+function markMainSectionElapsed() {
+  if (!currentSectionId || !mainSectionEnteredAtMs) return;
+  const diffMs = Date.now() - mainSectionEnteredAtMs;
+  const elapsed = diffMs > 0 ? Math.max(1, Math.floor(diffMs / 1000)) : 0;
+  if (elapsed > 0) {
+    const key = String(currentSectionId);
+    const prev = Number(mainSectionTimeSpent[key] || 0);
+    mainSectionTimeSpent[key] = prev + elapsed;
+  }
+  mainSectionEnteredAtMs = Date.now();
+}
+
+function startMainSectionTimer() {
+  mainSectionEnteredAtMs = currentSectionId ? Date.now() : null;
+}
+
+function getCurrentMainSectionElapsedSeconds() {
+  if (!currentSectionId) return 0;
+  const key = String(currentSectionId);
+  const base = Number(mainSectionTimeSpent[key] || 0);
+  if (!mainSectionEnteredAtMs) return base;
+  const live = Math.floor((Date.now() - mainSectionEnteredAtMs) / 1000);
+  const total = base + (live > 0 ? live : 0);
+  if (total <= 0 && mainSectionTouched[key]) return 1;
+  return total;
+}
+
+function markIqSectionElapsed() {
+  if (!iqCurrentSectionId || !iqSectionEnteredAtMs) return;
+  const diffMs = Date.now() - iqSectionEnteredAtMs;
+  const elapsed = diffMs > 0 ? Math.max(1, Math.floor(diffMs / 1000)) : 0;
+  if (elapsed > 0) {
+    const key = String(iqCurrentSectionId);
+    const prev = Number(iqSectionTimeSpent[key] || 0);
+    iqSectionTimeSpent[key] = prev + elapsed;
+  }
+  iqSectionEnteredAtMs = Date.now();
+}
+
+function startIqSectionTimer() {
+  iqSectionEnteredAtMs = iqCurrentSectionId ? Date.now() : null;
+}
+
+function getCurrentIqSectionElapsedSeconds() {
+  if (!iqCurrentSectionId) return 0;
+  const key = String(iqCurrentSectionId);
+  const base = Number(iqSectionTimeSpent[key] || 0);
+  if (!iqSectionEnteredAtMs) return base;
+  const live = Math.floor((Date.now() - iqSectionEnteredAtMs) / 1000);
+  const total = base + (live > 0 ? live : 0);
+  if (total <= 0 && iqSectionTouched[key]) return 1;
+  return total;
+}
+
+function updateLiveSectionTimers() {
+  const mainEl = document.getElementById('mainSectionTimer');
+  if (mainEl) {
+    mainEl.textContent = formatDurationHMS(getCurrentMainSectionElapsedSeconds());
+  }
+  const iqEl = document.getElementById('iqSectionTimer');
+  if (iqEl) {
+    iqEl.textContent = formatDurationHMS(getCurrentIqSectionElapsedSeconds());
+  }
+}
+
+function startLiveSectionTimerTicker() {
+  if (sectionTimerIntervalId) clearInterval(sectionTimerIntervalId);
+  updateLiveSectionTimers();
+  sectionTimerIntervalId = setInterval(updateLiveSectionTimers, 1000);
+}
 
 function persistSurveyDraft(stage = null) {
   try {
@@ -393,6 +502,8 @@ function persistSurveyDraft(stage = null) {
       iqResponses,
       iqSkippedSectionIds,
       activeMemberId,
+      mainSectionTimeSpent,
+      iqSectionTimeSpent,
       personalDraft
     };
     localStorage.setItem(SURVEY_DRAFT_KEY, JSON.stringify(payload));
@@ -451,6 +562,8 @@ function restoreSurveyDraft() {
   iqResponses = draft.iqResponses || {};
   iqSkippedSectionIds = Array.isArray(draft.iqSkippedSectionIds) ? draft.iqSkippedSectionIds : [];
   activeMemberId = draft.activeMemberId || null;
+  mainSectionTimeSpent = normalizeSectionTimerMap(draft.mainSectionTimeSpent);
+  iqSectionTimeSpent = normalizeSectionTimerMap(draft.iqSectionTimeSpent);
   if (draft.personalDraft) {
     prefillPersonForm(draft.personalDraft);
   }
@@ -470,6 +583,8 @@ function applySurveyState(state) {
   if (state.iqCurrentSectionId !== undefined) iqCurrentSectionId = state.iqCurrentSectionId;
   if (typeof state.currentIndex === 'number') currentIndex = state.currentIndex;
   if (state.currentSectionId !== undefined) currentSectionId = state.currentSectionId;
+  if (state.mainSectionTimeSpent) mainSectionTimeSpent = normalizeSectionTimerMap(state.mainSectionTimeSpent);
+  if (state.iqSectionTimeSpent) iqSectionTimeSpent = normalizeSectionTimerMap(state.iqSectionTimeSpent);
   if (state.personalDraft) prefillPersonForm(state.personalDraft);
 }
 
@@ -552,6 +667,7 @@ function persistServerDraft(payload) {
   const survey_state = {
     stage: payload.stage,
     skippedSectionIds: payload.skippedSectionIds,
+    mainSectionTimeSpent: payload.mainSectionTimeSpent,
     members: payload.members,
     totalMembers: payload.totalMembers,
     currentMemberIndex: payload.currentMemberIndex,
@@ -559,6 +675,7 @@ function persistServerDraft(payload) {
     activeMemberId: payload.activeMemberId,
     iqResponses: payload.iqResponses,
     iqSkippedSectionIds: payload.iqSkippedSectionIds,
+    iqSectionTimeSpent: payload.iqSectionTimeSpent,
     iqCurrentIndex: payload.iqCurrentIndex,
     iqCurrentSectionId: payload.iqCurrentSectionId,
     currentIndex: payload.currentIndex,
@@ -628,7 +745,12 @@ async function initPage() {
 
 // Call on page load
 document.addEventListener('DOMContentLoaded', initPage);
-window.addEventListener('beforeunload', () => persistSurveyDraft());
+document.addEventListener('DOMContentLoaded', startLiveSectionTimerTicker);
+window.addEventListener('beforeunload', () => {
+  markMainSectionElapsed();
+  markIqSectionElapsed();
+  persistSurveyDraft();
+});
 
 
 function prefillPersonForm(pd) {
@@ -693,9 +815,11 @@ function renderSidebar() {
 }
 
 async function loadSection(index) {
+  markMainSectionElapsed();
   currentIndex = index;
   const currentSection = sections[index];
   currentSectionId = currentSection.section_id;
+  startMainSectionTimer();
 
   document.getElementById('currentSectionTitle').innerText = currentSection.title;
 
@@ -854,11 +978,20 @@ function saveAnswer(qid, val, qtype) {
     responses[qid] = val;
   }
 
+  if (currentSectionId !== null && currentSectionId !== undefined) {
+    mainSectionTouched[String(currentSectionId)] = true;
+  }
+
   // persist
+  const sectionTimeSpentSeconds = getCurrentMainSectionElapsedSeconds();
   fetch(`${API_BASE}/responses`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ section_id: currentSectionId, responses })
+    body: JSON.stringify({
+      section_id: currentSectionId,
+      responses,
+      section_time_spent_seconds: sectionTimeSpentSeconds,
+    })
   }).catch(() => { /* ignore */ });
 
   // child trigger logic (supports single + multi)
@@ -883,13 +1016,15 @@ function saveAnswer(qid, val, qtype) {
 }
 
 async function saveCurrentSection(isSkipped = false) {
+  const sectionTimeSpentSeconds = getCurrentMainSectionElapsedSeconds();
   await fetch(`${API_BASE}/responses`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       section_id: currentSectionId,
       responses: isSkipped ? {} : responses,
-      is_skipped: !!isSkipped
+      is_skipped: !!isSkipped,
+      section_time_spent_seconds: sectionTimeSpentSeconds,
     })
   });
 }
@@ -946,12 +1081,22 @@ async function submitSurvey() {
     mainQuestionnaireId = householdData.main_questionnaire_id;
   }
   await saveCurrentSection();
+  markMainSectionElapsed();
+  const finalizedMainSectionTimes = sanitizeSectionTimerMap(mainSectionTimeSpent);
+  const currentMainKey = String(currentSectionId || '');
+  if (currentMainKey && mainSectionTouched[currentMainKey] && !finalizedMainSectionTimes[currentMainKey]) {
+    finalizedMainSectionTimes[currentMainKey] = Math.max(1, getCurrentMainSectionElapsedSeconds());
+  }
 
   try {
     const res = await fetch(`${API_BASE}/main-questionnaire/submit`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ responses, main_questionnaire_id: mainQuestionnaireId })
+      body: JSON.stringify({
+        responses,
+        main_questionnaire_id: mainQuestionnaireId,
+        section_time_spent_seconds: finalizedMainSectionTimes,
+      })
     });
     const result = await res.json();
     if (!res.ok || !result.success) {
@@ -1261,6 +1406,7 @@ async function openIndividualQuestionnaire(memberIndex) {
 }
 
 function backToMembers() {
+  markIqSectionElapsed();
   document.getElementById('individual-questionnaire-layer').classList.add('hidden');
   document.getElementById('member-table-layer').classList.remove('hidden');
   showMemberTable();
@@ -1304,9 +1450,11 @@ function renderIndividualSidebar() {
 }
 
 function loadIndividualSection(index) {
+  markIqSectionElapsed();
   iqCurrentIndex = index;
   const currentSection = iqSections[index];
   iqCurrentSectionId = currentSection.section_id;
+  startIqSectionTimer();
 
   document.getElementById('iq_currentSectionTitle').innerText = currentSection.title;
 
@@ -1444,6 +1592,10 @@ function saveIndividualAnswer(qid, val, qtype) {
     iqResponses[qid] = val;
   }
 
+  if (iqCurrentSectionId !== null && iqCurrentSectionId !== undefined) {
+    iqSectionTouched[String(iqCurrentSectionId)] = true;
+  }
+
   const childWrap = document.getElementById(`iq_child_wrap_${qid}`);
   if (childWrap) {
     const currentVal = iqResponses[qid];
@@ -1475,6 +1627,7 @@ function moveIndividualSection(direction) {
 
 async function saveAndNextIndividual() {
   if (!validateIndividualSection()) return;
+  markIqSectionElapsed();
   iqSkippedSectionIds = iqSkippedSectionIds.filter(id => Number(id) !== Number(iqCurrentSectionId));
   persistSurveyDraft('individual-questionnaire-layer');
   moveIndividualSection(1);
@@ -1482,6 +1635,7 @@ async function saveAndNextIndividual() {
 
 function skipIndividualSectionForNow() {
   if (!iqCurrentSectionId) return;
+  markIqSectionElapsed();
   if (!iqSkippedSectionIds.includes(iqCurrentSectionId)) {
     iqSkippedSectionIds.push(iqCurrentSectionId);
   }
@@ -1567,6 +1721,12 @@ function validateIndividualSection() {
 async function submitIndividualQuestionnaire() {
   if (!validateIndividualSection()) return;
   iqSkippedSectionIds = iqSkippedSectionIds.filter(id => Number(id) !== Number(iqCurrentSectionId));
+  markIqSectionElapsed();
+  const finalizedIqSectionTimes = sanitizeSectionTimerMap(iqSectionTimeSpent);
+  const currentIqKey = String(iqCurrentSectionId || '');
+  if (currentIqKey && iqSectionTouched[currentIqKey] && !finalizedIqSectionTimes[currentIqKey]) {
+    finalizedIqSectionTimes[currentIqKey] = Math.max(1, getCurrentIqSectionElapsedSeconds());
+  }
 
   const member = members.find(m => m.member_id === activeMemberId);
   if (!member) {
@@ -1581,7 +1741,8 @@ async function submitIndividualQuestionnaire() {
       body: JSON.stringify({
         main_questionnaire_id: mainQuestionnaireId,
         member,
-        responses: iqResponses
+        responses: iqResponses,
+        individual_section_time_spent_seconds: finalizedIqSectionTimes,
       })
     });
     const result = await res.json();
