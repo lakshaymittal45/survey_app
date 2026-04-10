@@ -402,9 +402,176 @@ let draftSaveTimer = null;
 let skippedSectionIds = [];
 let iqSkippedSectionIds = [];
 let forceMainStage = false;
+let surveyTimingLocked = false;
+let mainSectionTimeSpentSeconds = {};
+let iqSectionTimeSpentSeconds = {};
+let mainActiveSectionId = null;
+let mainSectionEnterEpochMs = null;
+let iqActiveSectionId = null;
+let iqSectionEnterEpochMs = null;
+
+function sectionKey(sectionId) {
+  if (sectionId === null || sectionId === undefined || sectionId === '') return null;
+  return String(sectionId);
+}
+
+function ensureSectionTimerSlot(mapObj, key) {
+  if (!key) return;
+  if (!Object.prototype.hasOwnProperty.call(mapObj, key)) {
+    mapObj[key] = 0;
+  }
+}
+
+function beginMainSectionTimer(sectionId) {
+  if (surveyTimingLocked) return;
+  const key = sectionKey(sectionId);
+  if (!key) return;
+  mainActiveSectionId = key;
+  mainSectionEnterEpochMs = Date.now();
+  ensureSectionTimerSlot(mainSectionTimeSpentSeconds, key);
+}
+
+function commitMainSectionElapsed(sectionId) {
+  if (surveyTimingLocked) return 0;
+  const key = sectionKey(sectionId);
+  if (!key) return 0;
+  ensureSectionTimerSlot(mainSectionTimeSpentSeconds, key);
+  if (mainActiveSectionId === key && mainSectionEnterEpochMs !== null) {
+    const delta = Math.max(0, Math.floor((Date.now() - mainSectionEnterEpochMs) / 1000));
+    if (delta > 0) {
+      mainSectionTimeSpentSeconds[key] += delta;
+    }
+    mainSectionEnterEpochMs = Date.now();
+  }
+  return Number(mainSectionTimeSpentSeconds[key] || 0);
+}
+
+function currentMainSectionElapsed(sectionId) {
+  const key = sectionKey(sectionId);
+  if (!key) return 0;
+  ensureSectionTimerSlot(mainSectionTimeSpentSeconds, key);
+  const committed = Number(mainSectionTimeSpentSeconds[key] || 0);
+  if (mainActiveSectionId === key && mainSectionEnterEpochMs !== null) {
+    const live = Math.max(0, Math.floor((Date.now() - mainSectionEnterEpochMs) / 1000));
+    return committed + live;
+  }
+  return committed;
+}
+
+function markMainSectionSkipped(sectionId) {
+  const key = sectionKey(sectionId);
+  if (!key) return;
+  ensureSectionTimerSlot(mainSectionTimeSpentSeconds, key);
+  if (mainActiveSectionId === key) {
+    mainActiveSectionId = null;
+    mainSectionEnterEpochMs = null;
+  }
+}
+
+function buildMainSectionTimeMap() {
+  const map = { ...mainSectionTimeSpentSeconds };
+  const key = sectionKey(currentSectionId);
+  if (key) {
+    map[key] = currentMainSectionElapsed(key);
+  }
+  skippedSectionIds.forEach((sid) => {
+    const skey = sectionKey(sid);
+    if (!skey) return;
+    if (!Object.prototype.hasOwnProperty.call(map, skey)) {
+      map[skey] = 0;
+    }
+  });
+  return map;
+}
+
+function beginIndividualSectionTimer(sectionId) {
+  if (surveyTimingLocked) return;
+  const key = sectionKey(sectionId);
+  if (!key) return;
+  iqActiveSectionId = key;
+  iqSectionEnterEpochMs = Date.now();
+  ensureSectionTimerSlot(iqSectionTimeSpentSeconds, key);
+}
+
+function commitIndividualSectionElapsed(sectionId) {
+  if (surveyTimingLocked) return 0;
+  const key = sectionKey(sectionId);
+  if (!key) return 0;
+  ensureSectionTimerSlot(iqSectionTimeSpentSeconds, key);
+  if (iqActiveSectionId === key && iqSectionEnterEpochMs !== null) {
+    const delta = Math.max(0, Math.floor((Date.now() - iqSectionEnterEpochMs) / 1000));
+    if (delta > 0) {
+      iqSectionTimeSpentSeconds[key] += delta;
+    }
+    iqSectionEnterEpochMs = Date.now();
+  }
+  return Number(iqSectionTimeSpentSeconds[key] || 0);
+}
+
+function currentIndividualSectionElapsed(sectionId) {
+  const key = sectionKey(sectionId);
+  if (!key) return 0;
+  ensureSectionTimerSlot(iqSectionTimeSpentSeconds, key);
+  const committed = Number(iqSectionTimeSpentSeconds[key] || 0);
+  if (iqActiveSectionId === key && iqSectionEnterEpochMs !== null) {
+    const live = Math.max(0, Math.floor((Date.now() - iqSectionEnterEpochMs) / 1000));
+    return committed + live;
+  }
+  return committed;
+}
+
+function markIndividualSectionSkipped(sectionId) {
+  const key = sectionKey(sectionId);
+  if (!key) return;
+  ensureSectionTimerSlot(iqSectionTimeSpentSeconds, key);
+  if (iqActiveSectionId === key) {
+    iqActiveSectionId = null;
+    iqSectionEnterEpochMs = null;
+  }
+}
+
+function buildIndividualSectionTimeMap() {
+  const map = { ...iqSectionTimeSpentSeconds };
+  const key = sectionKey(iqCurrentSectionId);
+  if (key) {
+    map[key] = currentIndividualSectionElapsed(key);
+  }
+  iqSkippedSectionIds.forEach((sid) => {
+    const skey = sectionKey(sid);
+    if (!skey) return;
+    if (!Object.prototype.hasOwnProperty.call(map, skey)) {
+      map[skey] = 0;
+    }
+  });
+  return map;
+}
+
+function stopMainSectionTimer() {
+  mainActiveSectionId = null;
+  mainSectionEnterEpochMs = null;
+}
+
+function stopIndividualSectionTimer() {
+  iqActiveSectionId = null;
+  iqSectionEnterEpochMs = null;
+}
+
+function syncActiveMemberIndividualTiming() {
+  const member = members.find(m => m.member_id === activeMemberId);
+  if (!member) return;
+  member.individual_section_time_spent_seconds = buildIndividualSectionTimeMap();
+}
 
 function persistSurveyDraft(stage = null) {
   try {
+    if (currentSectionId !== null && currentSectionId !== undefined && mainActiveSectionId === sectionKey(currentSectionId)) {
+      commitMainSectionElapsed(currentSectionId);
+    }
+    if (iqCurrentSectionId !== null && iqCurrentSectionId !== undefined && iqActiveSectionId === sectionKey(iqCurrentSectionId)) {
+      commitIndividualSectionElapsed(iqCurrentSectionId);
+    }
+    syncActiveMemberIndividualTiming();
+
     const personalDraft = {
       first_name: document.getElementById('p_first')?.value || '',
       middle_name: document.getElementById('p_middle')?.value || '',
@@ -433,6 +600,8 @@ function persistSurveyDraft(stage = null) {
       iqCurrentIndex,
       iqCurrentSectionId,
       iqResponses,
+      mainSectionTimeSpentSeconds,
+      iqSectionTimeSpentSeconds,
       iqSkippedSectionIds,
       activeMemberId,
       personalDraft
@@ -491,6 +660,12 @@ function restoreSurveyDraft() {
   iqCurrentIndex = draft.iqCurrentIndex || 0;
   iqCurrentSectionId = draft.iqCurrentSectionId || null;
   iqResponses = draft.iqResponses || {};
+  mainSectionTimeSpentSeconds = (draft.mainSectionTimeSpentSeconds && typeof draft.mainSectionTimeSpentSeconds === 'object')
+    ? draft.mainSectionTimeSpentSeconds
+    : {};
+  iqSectionTimeSpentSeconds = (draft.iqSectionTimeSpentSeconds && typeof draft.iqSectionTimeSpentSeconds === 'object')
+    ? draft.iqSectionTimeSpentSeconds
+    : {};
   iqSkippedSectionIds = Array.isArray(draft.iqSkippedSectionIds) ? draft.iqSkippedSectionIds : [];
   activeMemberId = draft.activeMemberId || null;
   if (draft.personalDraft) {
@@ -512,6 +687,12 @@ function applySurveyState(state) {
   if (state.iqCurrentSectionId !== undefined) iqCurrentSectionId = state.iqCurrentSectionId;
   if (typeof state.currentIndex === 'number') currentIndex = state.currentIndex;
   if (state.currentSectionId !== undefined) currentSectionId = state.currentSectionId;
+  if (state.mainSectionTimeSpentSeconds && typeof state.mainSectionTimeSpentSeconds === 'object') {
+    mainSectionTimeSpentSeconds = state.mainSectionTimeSpentSeconds;
+  }
+  if (state.iqSectionTimeSpentSeconds && typeof state.iqSectionTimeSpentSeconds === 'object') {
+    iqSectionTimeSpentSeconds = state.iqSectionTimeSpentSeconds;
+  }
   if (state.personalDraft) prefillPersonForm(state.personalDraft);
 }
 
@@ -540,6 +721,10 @@ async function applyServerDraft() {
     mainQuestionnaireId = data.main_questionnaire_id;
   }
   const serverResponses = data.responses || {};
+  const serverMainTimeMap =
+    data.main_section_time_spent_seconds && typeof data.main_section_time_spent_seconds === 'object'
+      ? data.main_section_time_spent_seconds
+      : {};
   const surveyState = data.draft && data.draft.survey_state;
   const localDraft = loadSurveyDraft();
   if (forceMainStage) {
@@ -547,6 +732,7 @@ async function applyServerDraft() {
   }
   if (!localDraft) {
     responses = serverResponses;
+    mainSectionTimeSpentSeconds = { ...serverMainTimeMap };
     applySurveyState(surveyState);
     if (!forceMainStage) {
       return surveyState?.stage || null;
@@ -556,6 +742,10 @@ async function applyServerDraft() {
     return 'survey-layer';
   }
   responses = { ...serverResponses, ...responses };
+  mainSectionTimeSpentSeconds = {
+    ...serverMainTimeMap,
+    ...mainSectionTimeSpentSeconds,
+  };
   if (forceMainStage) {
     applySurveyState(surveyState);
   }
@@ -603,6 +793,8 @@ function persistServerDraft(payload) {
     iqSkippedSectionIds: payload.iqSkippedSectionIds,
     iqCurrentIndex: payload.iqCurrentIndex,
     iqCurrentSectionId: payload.iqCurrentSectionId,
+    mainSectionTimeSpentSeconds: payload.mainSectionTimeSpentSeconds,
+    iqSectionTimeSpentSeconds: payload.iqSectionTimeSpentSeconds,
     currentIndex: payload.currentIndex,
     currentSectionId: payload.currentSectionId,
     personalDraft: payload.personalDraft
@@ -735,9 +927,15 @@ function renderSidebar() {
 }
 
 async function loadSection(index) {
+  const prevSectionId = currentSectionId;
+  if (prevSectionId !== null && prevSectionId !== undefined) {
+    commitMainSectionElapsed(prevSectionId);
+  }
+
   currentIndex = index;
   const currentSection = sections[index];
   currentSectionId = currentSection.section_id;
+  beginMainSectionTimer(currentSectionId);
 
   document.getElementById('currentSectionTitle').innerText = currentSection.title;
 
@@ -900,7 +1098,11 @@ function saveAnswer(qid, val, qtype) {
   fetch(`${API_BASE}/responses`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ section_id: currentSectionId, responses })
+    body: JSON.stringify({
+      section_id: currentSectionId,
+      responses,
+      section_time_spent_seconds: currentMainSectionElapsed(currentSectionId)
+    })
   }).catch(() => { /* ignore */ });
 
   // child trigger logic (supports single + multi)
@@ -925,13 +1127,22 @@ function saveAnswer(qid, val, qtype) {
 }
 
 async function saveCurrentSection(isSkipped = false) {
+  const sectionElapsedSeconds = isSkipped
+    ? 0
+    : commitMainSectionElapsed(currentSectionId);
+
+  if (isSkipped) {
+    markMainSectionSkipped(currentSectionId);
+  }
+
   await fetch(`${API_BASE}/responses`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       section_id: currentSectionId,
       responses: isSkipped ? {} : responses,
-      is_skipped: !!isSkipped
+      is_skipped: !!isSkipped,
+      section_time_spent_seconds: sectionElapsedSeconds
     })
   });
 }
@@ -988,12 +1199,17 @@ async function submitSurvey() {
     mainQuestionnaireId = householdData.main_questionnaire_id;
   }
   await saveCurrentSection();
+  stopMainSectionTimer();
 
   try {
     const res = await fetch(`${API_BASE}/main-questionnaire/submit`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ responses, main_questionnaire_id: mainQuestionnaireId })
+      body: JSON.stringify({
+        responses,
+        main_questionnaire_id: mainQuestionnaireId,
+        section_time_spent_seconds: buildMainSectionTimeMap()
+      })
     });
     const result = await res.json();
     if (!res.ok || !result.success) {
@@ -1276,6 +1492,13 @@ async function openIndividualQuestionnaire(memberIndex) {
   const member = members[memberIndex];
   if (!member) return;
 
+  iqSectionTimeSpentSeconds =
+    member.individual_section_time_spent_seconds && typeof member.individual_section_time_spent_seconds === 'object'
+      ? { ...member.individual_section_time_spent_seconds }
+      : {};
+  iqActiveSectionId = null;
+  iqSectionEnterEpochMs = null;
+
   const prevActive = activeMemberId;
   const prevIq = iqResponses;
   const prevIqIndex = iqCurrentIndex;
@@ -1303,6 +1526,7 @@ async function openIndividualQuestionnaire(memberIndex) {
 }
 
 function backToMembers() {
+  stopIndividualSectionTimer();
   document.getElementById('individual-questionnaire-layer').classList.add('hidden');
   document.getElementById('member-table-layer').classList.remove('hidden');
   showMemberTable();
@@ -1346,9 +1570,15 @@ function renderIndividualSidebar() {
 }
 
 function loadIndividualSection(index) {
+  const prevSectionId = iqCurrentSectionId;
+  if (prevSectionId !== null && prevSectionId !== undefined) {
+    commitIndividualSectionElapsed(prevSectionId);
+  }
+
   iqCurrentIndex = index;
   const currentSection = iqSections[index];
   iqCurrentSectionId = currentSection.section_id;
+  beginIndividualSectionTimer(iqCurrentSectionId);
 
   document.getElementById('iq_currentSectionTitle').innerText = currentSection.title;
 
@@ -1527,6 +1757,7 @@ function skipIndividualSectionForNow() {
   if (!iqSkippedSectionIds.includes(iqCurrentSectionId)) {
     iqSkippedSectionIds.push(iqCurrentSectionId);
   }
+  markIndividualSectionSkipped(iqCurrentSectionId);
   persistSurveyDraft('individual-questionnaire-layer');
   if (iqCurrentIndex < iqSections.length - 1) {
     moveIndividualSection(1);
@@ -1609,6 +1840,8 @@ function validateIndividualSection() {
 async function submitIndividualQuestionnaire() {
   if (!validateIndividualSection()) return;
   iqSkippedSectionIds = iqSkippedSectionIds.filter(id => Number(id) !== Number(iqCurrentSectionId));
+  commitIndividualSectionElapsed(iqCurrentSectionId);
+  const individualSectionTimeMap = buildIndividualSectionTimeMap();
 
   const member = members.find(m => m.member_id === activeMemberId);
   if (!member) {
@@ -1623,7 +1856,9 @@ async function submitIndividualQuestionnaire() {
       body: JSON.stringify({
         main_questionnaire_id: mainQuestionnaireId,
         member,
-        responses: iqResponses
+        responses: iqResponses,
+        individual_section_time_spent_seconds: individualSectionTimeMap,
+        section_time_spent_seconds: individualSectionTimeMap
       })
     });
     const result = await res.json();
@@ -1635,7 +1870,9 @@ async function submitIndividualQuestionnaire() {
     member.individual_completed = true;
     member.individual_questionnaire_id = result.individual_questionnaire_id;
     member.individual_responses = { ...iqResponses };
+    member.individual_section_time_spent_seconds = individualSectionTimeMap;
     member.skipped_sections = [...iqSkippedSectionIds];
+    stopIndividualSectionTimer();
 
     alert('Individual questionnaire submitted successfully.');
     await finalizeSurveyIfComplete();
@@ -1670,6 +1907,9 @@ async function finalizeSurveyIfComplete() {
     const result = await res.json();
     if (res.ok && result.success) {
       alert('Survey completed successfully.');
+      surveyTimingLocked = true;
+      stopMainSectionTimer();
+      stopIndividualSectionTimer();
       try { localStorage.removeItem(SURVEY_DRAFT_KEY); } catch (e) {}
     }
   } catch (e) {

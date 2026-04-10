@@ -1,4 +1,4 @@
-import os
+﻿import os
 import json
 import secrets
 import traceback
@@ -1780,7 +1780,16 @@ def get_household_draft():
         """), {"hid": household_id}).mappings().fetchone()
 
         main_id = main_row["main_questionnaire_id"] if main_row else None
-        status = _extract_status(safe_json_load(main_row["responses"])) if main_row else None
+        main_payload = safe_json_load(main_row["responses"]) if main_row else {}
+        status = _extract_status(main_payload) if main_row else None
+
+        main_section_time_map = {}
+        if isinstance(main_payload, dict):
+            raw_main_map = main_payload.get("section_time_spent_seconds") or {}
+            if isinstance(raw_main_map, dict):
+                main_section_time_map = {
+                    str(k): safe_int(v, 0) for k, v in raw_main_map.items()
+                }
 
         draft_row = db.session.execute(sql_text("""
             SELECT TOP 1 response_data
@@ -1791,13 +1800,27 @@ def get_household_draft():
         draft_payload = safe_json_load(draft_row["response_data"]) if draft_row else {}
         combined = _combine_draft_sections(draft_payload)
 
+        # Draft section time should override/extend baseline for in-progress edits.
+        sections_obj = (draft_payload or {}).get("sections", {}) if isinstance(draft_payload, dict) else {}
+        if isinstance(sections_obj, dict):
+            for sid, sec in sections_obj.items():
+                sec_obj = sec if isinstance(sec, dict) else {}
+                main_section_time_map[str(sid)] = max(
+                    safe_int(main_section_time_map.get(str(sid)), 0),
+                    safe_int(sec_obj.get("time_spent_seconds"), 0),
+                )
+
+        reopened_for_edit = bool(session.pop("force_reopen_main", False))
+
         return jsonify({
             "success": True,
             "household_id": household_id,
             "main_questionnaire_id": main_id,
             "status": status,
+            "reopened_for_edit": reopened_for_edit,
             "draft": draft_payload,
-            "responses": combined
+            "responses": combined,
+            "main_section_time_spent_seconds": main_section_time_map,
         })
     except Exception as e:
         return json_error(str(e), 500)
@@ -4174,22 +4197,31 @@ def admin_get_household_main_section_times(household_id):
             return jsonify([])
 
         payload = safe_json_load(row.get("responses")) or {}
-        section_time_map = (payload or {}).get("section_time_spent_seconds") or {}
+        submitted_map = (payload or {}).get("section_time_spent_seconds") or {}
+        if not isinstance(submitted_map, dict):
+            submitted_map = {}
 
-        if not isinstance(section_time_map, dict) or not section_time_map:
-            draft_row = db.session.execute(sql_text("""
-                SELECT TOP 1 response_data
-                FROM household_response_drafts
-                WHERE household_id = :hid
-                ORDER BY updated_at DESC
-            """), {"hid": household_id}).mappings().fetchone()
-            draft_payload = safe_json_load(draft_row.get("response_data")) if draft_row else {}
-            sections = (draft_payload or {}).get("sections") or {}
-            if isinstance(sections, dict):
-                section_time_map = {
-                    str(sid): safe_int((sec or {}).get("time_spent_seconds"), 0)
-                    for sid, sec in sections.items()
-                }
+        draft_row = db.session.execute(sql_text("""
+            SELECT TOP 1 response_data
+            FROM household_response_drafts
+            WHERE household_id = :hid
+            ORDER BY updated_at DESC
+        """), {"hid": household_id}).mappings().fetchone()
+        draft_payload = safe_json_load(draft_row.get("response_data")) if draft_row else {}
+        sections = (draft_payload or {}).get("sections") or {}
+        draft_map = {}
+        if isinstance(sections, dict):
+            draft_map = {
+                str(sid): safe_int((sec or {}).get("time_spent_seconds"), 0)
+                for sid, sec in sections.items()
+            }
+
+        # Always merge submitted + draft so admin sees in-progress edit time immediately.
+        all_sids = set(submitted_map.keys()) | set(draft_map.keys())
+        section_time_map = {
+            sid: max(safe_int(submitted_map.get(sid), 0), safe_int(draft_map.get(sid), 0))
+            for sid in all_sids
+        }
 
         section_rows = db.session.execute(sql_text("""
             SELECT section_id, section_title, section_order
@@ -4227,6 +4259,18 @@ def admin_get_household_main_section_times(household_id):
 @role_required("admin")
 def admin_get_household_individual_members(household_id):
     try:
+        section_rows = db.session.execute(sql_text("""
+            SELECT section_id, section_title, section_order
+            FROM individual_questionnaire_sections
+        """)).mappings().all()
+        section_meta = {
+            str(r.get("section_id")): {
+                "section_title": r.get("section_title") or "",
+                "section_order": safe_int(r.get("section_order"), 0),
+            }
+            for r in section_rows
+        }
+
         rows = db.session.execute(sql_text("""
             SELECT
                 ir.individual_questionnaire_id,
@@ -4238,6 +4282,27 @@ def admin_get_household_individual_members(household_id):
             ORDER BY ir.individual_questionnaire_id DESC
         """), {"hid": household_id}).mappings().all()
 
+        def _build_section_times(section_time_map):
+            rows_out = []
+            total_out = 0
+            if not isinstance(section_time_map, dict):
+                return rows_out, total_out
+
+            for sid, secs in section_time_map.items():
+                sec_int = safe_int(secs, 0)
+                total_out += sec_int
+                meta = section_meta.get(str(sid), {})
+                rows_out.append({
+                    "section_id": safe_int(sid),
+                    "section_title": meta.get("section_title") or f"Section {sid}",
+                    "seconds": sec_int,
+                    "_order": meta.get("section_order", 0),
+                })
+            rows_out.sort(key=lambda x: (safe_int(x.get("_order"), 0), safe_int(x.get("section_id"), 0)))
+            for item in rows_out:
+                item.pop("_order", None)
+            return rows_out, total_out
+
         members = []
         for r in rows:
             payload = safe_json_load(r.get("responses")) or {}
@@ -4247,12 +4312,74 @@ def admin_get_household_individual_members(household_id):
             surname = (member.get("surname") or "").strip()
             full_name = " ".join([first_name, middle_name, surname]).strip() or "N/A"
 
+            section_time_map = (payload or {}).get("section_time_spent_seconds") or (payload or {}).get("individual_section_time_spent_seconds") or {}
+            if not isinstance(section_time_map, dict):
+                section_time_map = {}
+            if not section_time_map and isinstance((payload or {}).get("responses"), dict):
+                nested_map = (payload or {}).get("responses", {}).get("section_time_spent_seconds") or (payload or {}).get("responses", {}).get("individual_section_time_spent_seconds") or {}
+                if isinstance(nested_map, dict):
+                    section_time_map = nested_map
+
+            section_times, total_seconds = _build_section_times(section_time_map)
+
             members.append({
                 "individual_questionnaire_id": r.get("individual_questionnaire_id"),
                 "name": full_name,
                 "age": member.get("age"),
                 "gender": member.get("gender"),
+                "section_times": section_times,
+                "total_seconds": total_seconds,
             })
+
+        # Include in-progress individual timings from survey_state draft so admin can see edits
+        # even before the individual questionnaire is finally submitted.
+        draft_row = db.session.execute(sql_text("""
+            SELECT TOP 1 response_data
+            FROM household_response_drafts
+            WHERE household_id = :hid
+            ORDER BY updated_at DESC
+        """), {"hid": household_id}).mappings().fetchone()
+        draft_payload = safe_json_load(draft_row.get("response_data")) if draft_row else {}
+        survey_state = (draft_payload or {}).get("survey_state") if isinstance(draft_payload, dict) else {}
+        draft_members = (survey_state or {}).get("members") if isinstance(survey_state, dict) else []
+
+        if isinstance(draft_members, list) and draft_members:
+            existing_by_individual_id = {}
+            for item in members:
+                iid = safe_int(item.get("individual_questionnaire_id"))
+                if iid:
+                    existing_by_individual_id[iid] = item
+
+            for dm in draft_members:
+                if not isinstance(dm, dict):
+                    continue
+                dm_time_map = dm.get("individual_section_time_spent_seconds") or dm.get("section_time_spent_seconds") or {}
+                dm_section_times, dm_total = _build_section_times(dm_time_map)
+                if dm_total <= 0 and not dm_section_times:
+                    continue
+
+                dm_iid = safe_int(dm.get("individual_questionnaire_id"))
+                dm_name = " ".join([
+                    (dm.get("first_name") or "").strip(),
+                    (dm.get("middle_name") or "").strip(),
+                    (dm.get("surname") or "").strip(),
+                ]).strip() or "N/A"
+
+                if dm_iid and dm_iid in existing_by_individual_id:
+                    target = existing_by_individual_id[dm_iid]
+                    target["section_times"] = dm_section_times
+                    target["total_seconds"] = dm_total
+                    continue
+
+                members.append({
+                    "individual_questionnaire_id": dm_iid,
+                    "name": dm_name,
+                    "age": dm.get("age"),
+                    "gender": dm.get("gender"),
+                    "section_times": dm_section_times,
+                    "total_seconds": dm_total,
+                    "draft_only": True,
+                })
 
         return jsonify(members)
     except Exception as e:

@@ -2236,6 +2236,15 @@
         return `${pad(hh)}:${pad(mm)}:${pad(ss)}`;
       }
 
+      function sumSectionDuration(sectionTimes) {
+        if (!Array.isArray(sectionTimes)) return 0;
+        return sectionTimes.reduce(
+          (total, item) =>
+            total + Math.max(0, Math.floor(Number(item?.seconds) || 0)),
+          0,
+        );
+      }
+
       function showInlineMessage(id, msg, type) {
         const el = document.getElementById(id);
         if (!el) return;
@@ -5379,6 +5388,10 @@
                   </tr>`;
                 })
                 .join("")}
+              <tr>
+                <th>Total</th>
+                <th>${escapeAttr(formatDurationHMS(sumSectionDuration(sectionTimes)))}</th>
+              </tr>
             </table>
           </div>
           ` : `
@@ -6273,6 +6286,48 @@
           );
           const members = await membersRes.json();
 
+          const memberTimings = await Promise.all(
+            (Array.isArray(members) ? members : []).map(async (member) => {
+              const inlineTimes = Array.isArray(member?.section_times)
+                ? member.section_times
+                : [];
+              if (inlineTimes.length > 0 || Number(member?.total_seconds || 0) > 0) {
+                return {
+                  ...member,
+                  section_times: inlineTimes,
+                  total_seconds: Number(member?.total_seconds || sumSectionDuration(inlineTimes)),
+                };
+              }
+
+              const individualId = Number(member?.individual_questionnaire_id);
+              if (!individualId) {
+                return { ...member, section_times: [], total_seconds: 0 };
+              }
+
+              try {
+                const indRes = await apiFetch(
+                  `/api/admin/individual-response/${encodeURIComponent(individualId)}`,
+                );
+                const indData = await indRes.json();
+                const times = Array.isArray(indData?.section_times)
+                  ? indData.section_times
+                  : [];
+                return {
+                  ...member,
+                  section_times: times,
+                  total_seconds: sumSectionDuration(times),
+                };
+              } catch (_) {
+                return {
+                  ...member,
+                  section_times: [],
+                  total_seconds: 0,
+                  timing_error: true,
+                };
+              }
+            }),
+          );
+
           let html = `
             <div class="form-container" style="margin-bottom: 20px;">
               <h3 style="margin-top:0;">Household Details</h3>
@@ -6314,6 +6369,7 @@
           }
 
           if (Array.isArray(sectionTimes) && sectionTimes.length > 0) {
+            const mainTotalSeconds = sumSectionDuration(sectionTimes);
             html += `
               <div class="form-container" style="margin-top: 20px;">
                 <h3 style="margin-top:0;">Main Questionnaire - Section Wise Time</h3>
@@ -6330,7 +6386,18 @@
                       </tr>`;
                     })
                     .join("")}
+                  <tr>
+                    <th>Total</th>
+                    <th>${escapeAttr(formatDurationHMS(mainTotalSeconds))}</th>
+                  </tr>
                 </table>
+              </div>
+            `;
+          } else {
+            html += `
+              <div class="form-container" style="margin-top: 20px;">
+                <h3 style="margin-top:0;">Main Questionnaire - Section Wise Time</h3>
+                <div class="empty-state">No section-wise timing recorded for the main questionnaire.</div>
               </div>
             `;
           }
@@ -6340,20 +6407,80 @@
               <div class="form-container" style="margin-top: 20px;">
                 <h3 style="margin-top:0;">Family Members - Individual Responses (${members.length})</h3>
                 <table class="data-table">
-                  <tr><th>Name</th><th>Age</th><th>Gender</th><th>Action</th></tr>
-                  ${members
-                    .map(
-                      (m) => `<tr>
+                  <tr><th>Name</th><th>Age</th><th>Gender</th><th>Total Time</th><th>Action</th></tr>
+                  ${memberTimings
+                    .map((m) => {
+                      const canView = Number(m.individual_questionnaire_id) > 0;
+                      return `<tr>
                         <td>${escapeAttr(m.name || "N/A")}</td>
                         <td>${escapeAttr(String(m.age ?? "N/A"))}</td>
                         <td>${escapeAttr(String(m.gender ?? "N/A"))}</td>
+                        <td>${escapeAttr(m.timing_error ? "Unavailable" : formatDurationHMS(m.total_seconds || 0))}</td>
                         <td class="actions">
-                          <button class="btn btn-edit" onclick="viewIndividualResponse(${Number(m.individual_questionnaire_id)})">View Response</button>
+                          ${canView
+                            ? `<button class="btn btn-edit" onclick="viewIndividualResponse(${Number(m.individual_questionnaire_id)})">View Response</button>`
+                            : `<span style="color:#6b7280; font-size:12px;">In Progress</span>`}
                         </td>
-                      </tr>`,
-                    )
+                      </tr>`;
+                    })
                     .join("")}
                 </table>
+              </div>
+            `;
+
+            html += `
+              <div class="form-container" style="margin-top: 20px;">
+                <h3 style="margin-top:0;">Individual Questionnaire - Section Wise Time</h3>
+                ${memberTimings
+                  .map((m) => {
+                    const memberName = m.name || "N/A";
+                    const times = Array.isArray(m.section_times) ? m.section_times : [];
+                    const totalSeconds = Number(m.total_seconds || 0);
+
+                    if (m.timing_error) {
+                      return `
+                        <div style="margin-bottom:14px; border:1px solid #e5e7eb; border-radius:8px; padding:12px;">
+                          <h4 style="margin:0 0 8px 0;">${escapeAttr(memberName)}</h4>
+                          <div class="empty-state" style="margin:0;">Timing data could not be loaded.</div>
+                        </div>
+                      `;
+                    }
+
+                    if (!times.length) {
+                      return `
+                        <div style="margin-bottom:14px; border:1px solid #e5e7eb; border-radius:8px; padding:12px;">
+                          <h4 style="margin:0 0 8px 0;">${escapeAttr(memberName)}</h4>
+                          <div class="empty-state" style="margin:0;">No section-wise timing recorded.</div>
+                        </div>
+                      `;
+                    }
+
+                    return `
+                      <div style="margin-bottom:14px; border:1px solid #e5e7eb; border-radius:8px; padding:12px;">
+                        <h4 style="margin:0 0 8px 0;">${escapeAttr(memberName)}</h4>
+                        <table class="data-table">
+                          <tr><th>Section</th><th>Time (HH:MM:SS)</th></tr>
+                          ${times
+                            .map((t) => {
+                              const sectionName =
+                                t.section_title ||
+                                "Section " + String(t.section_id || "");
+                              const seconds = Number(t.seconds || 0);
+                              return `<tr>
+                                <td>${escapeAttr(sectionName)}</td>
+                                <td>${escapeAttr(formatDurationHMS(seconds))}</td>
+                              </tr>`;
+                            })
+                            .join("")}
+                          <tr>
+                            <th>Total</th>
+                            <th>${escapeAttr(formatDurationHMS(totalSeconds))}</th>
+                          </tr>
+                        </table>
+                      </div>
+                    `;
+                  })
+                  .join("")}
               </div>
             `;
           } else {
